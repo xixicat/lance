@@ -131,3 +131,13 @@ Contributor and maintainer attention is the most valuable resource. Less is more
 - Be concise and clear. Focus on P0/P1 issues: severe bugs, performance degradation, security concerns.
 - Do not reiterate detailed changes or repeat what's already well done.
 - Check naming consistency, error handling patterns, and test coverage.
+
+## Cursor Cloud specific instructions
+
+Scope that is set up and verified in the cloud VM: the Rust core workspace and the Python bindings (`pylance`). Java bindings and the Docker-based S3/DynamoDB integration tests are not set up (optional surfaces).
+
+- System prerequisites (`protobuf-compiler`, `libssl-dev`, `pkg-config`) and `uv` are preinstalled in the VM snapshot; `uv` is symlinked into `/usr/local/bin`. The startup update script only runs `uv sync` in `python/`, which refreshes Python deps and rebuilds the `pylance` extension when its inputs change (fast no-op when nothing changed).
+- Rust is pinned to 1.97.0 via `rust-toolchain.toml` and resolves automatically. Standard Rust commands are in the root `## Development Commands` section.
+- Python commands follow `python/AGENTS.md`: always `uv run --frozen ...` from `python/` (e.g. `uv run --frozen make test`, `uv run --frozen pytest ...`). Do not invoke bare `python`/`pytest`/`maturin`.
+- After changing Rust code that backs the Python bindings, rebuild the extension with `cd python && make build` (maturin develop, ~6 min). This is NOT automatic — importing `lance` will keep using the previously built extension until you rebuild.
+- `cd python && make install` will error at its final `pre-commit install` step because the cloud env sets `git core.hooksPath`; this is expected and harmless — the preceding `uv sync` (the part that matters) still succeeds. Prefer running `uv sync` directly over `make install`.
