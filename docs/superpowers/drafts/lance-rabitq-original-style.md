@@ -161,17 +161,76 @@ $$
 \end{aligned}
 $$
 
-对符号 bit 做点积后，`storage.rs` 中的查询计算等价于
+把交叉项估计代回 L2 展开，并按**计算时机**拆开。离线项只依赖数据向量、所属中心和符号码，
+在 Indexing 时写入每行；在线项在查询到达后计算。把 \(\langle W(q-c),u\rangle\) 拆成
+\(\langle Wq,u\rangle-\langle Wc,u\rangle\) 之后，与质心有关的那一半可以并进离线的 `add`，
+热路径里真正要和每条码相乘的只剩下 \(\langle Wq,u\rangle\)：
+
+$$
+\begin{aligned}
+\hat{d}^{2}(q,o)
+&=
+\underbrace{\lVert q-c\rVert^{2}}_{\text{在线 B：query}}
++
+\underbrace{\Biggl(\lVert r\rVert^{2}
++\frac{2\lVert r\rVert^{2}\langle Wc,u\rangle}{\langle Wr,u\rangle}\Biggr)}_{\text{离线 A：add}}
+\\
+&\quad+
+\underbrace{\Biggl(\frac{-2\lVert r\rVert^{2}}{\langle Wr,u\rangle}\Biggr)}_{\text{离线 C：scale}}
+\cdot
+\underbrace{\langle Wq,u\rangle}_{\text{在线交互 D}}
+\end{aligned}
+$$
+
+- **离线数据项 A、C**：只与 \(o\)、\(c\) 和 \(u\) 有关，构建索引时预计算，对应每行的
+  `add` 与 `scale`。注意 A **不是**单独的 \(\lVert r\rVert^{2}\)：质心交叉项
+  \(\langle Wc,u\rangle\) 已经折进去，这样 D 才能写成对原始旋转查询的内积。
+- **在线查询项 B**：\(\lVert q-c\rVert^{2}\) 依赖查询和当前 IVF 分区中心，在探测该分区时
+  计算一次并在分区内复用；它不是全库一条全局常数。
+- **在线交互项 D**：\(\langle Wq,u\rangle\) 是唯一必须对每个候选求的码–查询内积。
+
+\(u_i=b_i-1/2\)，因此 D 不必对 \(\pm 0.5\) 坐标做浮点乘，而可以落到 \(\{0,1\}\) 码的
+SIMD 点积上：
+
+$$
+\langle Wq,u\rangle
+=\sum_{i}b_i(Wq)_i
+-\frac12\sum_{i}(Wq)_i
+=\texttt{binary\_ip}-\frac12\texttt{sum\_q}.
+$$
+
+其中 \(\texttt{sum\_q}\) 只依赖 \(Wq\)，每个查询计算一次；\(\texttt{binary\_ip}\) 才是
+分区扫描里的高频位运算/查表内积。`storage.rs` 中的查询计算因此就是
 
 ```text
-binary_dot = binary_ip - 0.5 * sum(rotated_query)
-estimate = binary_dot * scale + add + query
+binary_dot = binary_ip - 0.5 * sum(rotated_query)   # 在线交互 D
+estimate   = add + query + scale * binary_dot       # A + B + C·D
 ```
 
-其中 `binary_dot` 正是 \(\langle Wq,u\rangle\) 的实现形式。这样组织有两个工程收益：
-查询只需旋转一次；每条数据只携带自己的 `add`、`scale` 和二值码，就能复用同一份查询
-结果。更重要的是，这个公式清楚地区分了**精确的平方范数项**与**近似的交叉内积项**：
-误差来自方向估计，不来自把 \(\lVert r\rVert^2\) 当成量化范数。
+每行随索引固化的 1-bit 布局是
+
+```text
++------------------------+------------------+---------------------+---------------------+
+| 1-bit bitmap (d bits)  | add (float32)    | scale (float32)     | error (float32)     |
++------------------------+------------------+---------------------+---------------------+
+```
+
+`add`/`scale`/`error` 对应 RaBitQ-Library 的 `F_add` / `F_rescale` / `F_error`；查询侧的
+`query` 与下一章的 `query_error` 对应 `G_add` 与 `G_error`。各项计算时机如下：
+
+| 项 | 公式（L2） | Lance | 阶段 |
+|---|---|---|---|
+| A | \(\lVert r\rVert^{2}+2\lVert r\rVert^{2}\langle Wc,u\rangle/\langle Wr,u\rangle\) | `add` | 离线，每行 |
+| B | \(\lVert q-c\rVert^{2}\) | `query` | 在线，每查询×分区 |
+| C | \(-2\lVert r\rVert^{2}/\langle Wr,u\rangle\) | `scale` | 离线，每行 |
+| D | \(\langle Wq,u\rangle\) | `binary_dot` | 在线，每候选 |
+| E | \(2\lVert r\rVert\epsilon_0\cdot\text{angular\_error}\) | `error` | 离线，每行 |
+| F | \(\lVert q-c\rVert\) | `query_error` | 在线，每查询×分区 |
+
+这样组织有两个工程收益：
+查询向量只需旋转一次；每条数据只携带自己的三个浮点因子和二值码。更重要的是，公式区分了
+**精确的平方范数项**与**近似的交叉内积项**：误差来自方向估计，不来自把
+\(\lVert r\rVert^{2}\) 当成量化范数。
 
 ## 3. 概率误差界与下界剪枝
 
@@ -211,7 +270,17 @@ $$
 \text{query\_error}=\lVert q-c\rVert.
 $$
 
-因此完整的 L2 误差半径是
+因此完整的 L2 误差半径同样按离线/在线拆开：
+
+$$
+R_{\mathrm{L2}}
+=
+\underbrace{\bigl(2\lVert r\rVert\epsilon_0\cdot\text{angular\_error}\bigr)}_{\text{离线 E：error}}
+\cdot
+\underbrace{\lVert q-c\rVert}_{\text{在线 F：query\_error}}.
+$$
+
+展开后即
 
 $$
 R_{\mathrm{L2}}
@@ -229,17 +298,18 @@ R_{\mathrm{L2}}
 \lVert q-c\rVert.
 $$
 
-最终查询下界为
+E 随每行写入 `error`；F 与 B 一样依赖当前分区中心，在探测该分区时计算一次。在线阶段只做一次乘法：
 
 $$
-\text{lower\_bound}
-=\text{binary\_estimate}
--\text{error\_factor}\cdot\text{query\_error}.
+\Delta(q,o)=\text{error\_factor}\cdot\text{query\_error},\qquad
+\text{lower\_bound}=\hat{d}^{2}(q,o)-\Delta(q,o).
 $$
 
-这里必须强调“概率”二字：它来自 RaBitQ 理论的高概率误差控制，不是对每个向量都成立的
-确定性承诺。Lance 用这个下界与查询上界、当前 top-k 堆阈值比较；下界已经不可能胜出的
-候选可跳过后续 ex-code 重估，其余候选才进入多比特精排。
+这里必须强调“概率”二字：它来自 RaBitQ 理论的高概率误差控制，不是柯西–施瓦茨给出的
+逐点确定性包络，也不是 \(\lVert r-\alpha u\rVert\) 那种重构残差。Lance 用这个下界与
+查询上界、当前 top-k 堆阈值比较；下界已经不可能胜出的候选可跳过后续 ex-code 重估，
+其余候选才进入多比特精排。这是 `IVF_RQ` 分区扫描上的 gating，不是 DiskANN / HNSW
+图遍历里按 \([d_{\mathrm{lower}},d_{\mathrm{upper}}]\) 划分的三区域确定性剪枝。
 
 这条 gating 也有明确边界。在 `v10.0.0` 中，它用于满足条件的多比特 `IVF_RQ`
 分区扫描：查询估计器必须是 `RawQuery`，`num_bits > 1`，误差因子列必须存在，而且查询
@@ -315,8 +385,9 @@ $$
 RaBitQ 的精髓不是“用 1 bit 重构向量”，而是用随机旋转后的符号方向建立一个可校准的
 内积估计器：
 
-- \(\lVert r\rVert^2\) 始终作为精确项保留；
-- \(\langle Wq,u\rangle\) 与 \(\langle Wc,u\rangle\) 共同近似交叉项；
+- \(\lVert r\rVert^2\) 始终作为精确项保留，并与质心交叉项一起折进离线 `add`；
+- 离线三项是 `add` / `scale` / `error`，在线三项是 `query`、`query_error` 和交互内积
+  \(\langle Wq,u\rangle\)；
 - 完整 L2 误差半径同时包含系数 \(2\)、\(\lVert r\rVert\) 和
   \(\lVert q-c\rVert\)；
 - 多比特编码先逐向量优化 \(t\)，再落入对称半整数网格；

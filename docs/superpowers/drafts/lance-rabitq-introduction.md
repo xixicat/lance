@@ -48,14 +48,32 @@ d²(q,o) = ||q-c||² + ||r||² - 2<q-c,r>
 <q-c,r> ≈ ||r||² <W(q-c),u> / <Wr,u>
 ```
 
+再按离线（Indexing）和在线（Online）拆开。把 \(\langle W(q-c),u\rangle=\langle Wq,u\rangle-\langle Wc,u\rangle\) 后，与中心有关的一半并进每行的 `add`，热路径只对每条码计算 \(\langle Wq,u\rangle\)：
+
+```text
+d²̂(q,o) = ||q-c||²              # 在线 B：当前分区的 query
+         + ( ||r||² + 2||r||² <Wc,u>/<Wr,u> )   # 离线 A：add
+         + (-2||r||² / <Wr,u>) · <Wq,u>         # 离线 C：scale  × 在线交互 D
+```
+
+A、C 和误差因子 E 在建索引时写入每一行；B 和 F 依赖查询与当前 IVF 中心，进入该分区时算一次；D 才是对每个候选做的码内积。`add` 不是单独的 \(\lVert r\rVert^{2}\)。符号码按 \(u_i=b_i-1/2\) 中心化后，D 变成
+
+```text
+<Wq,u> = binary_ip - 0.5 * sum(Wq)
+estimate = add + query + scale * binary_dot
+```
+
+`sum(Wq)` 每个查询算一次；`binary_ip` 才是分区扫描里的高频计算。
+
 因此查询阶段无需重构完整浮点残差：读取打包的符号码和少量浮点校正因子，就能得到距离估计。
 
 ## 4. 误差范围如何帮助减少多比特计算
 
-概率界的工程价值不只是告诉我们“估计可能差多少”，还可以把误差半径变成保守下界。Lance 为候选保存与其量化误差有关的 `error_factor`；查询侧的尺度是 \(\lVert q-c\rVert\)。两者相乘得到本次查询的误差余量：
+概率界的工程价值不只是告诉我们“估计可能差多少”，还可以把误差半径变成保守下界。数据侧 `error_factor` 离线预计算，查询侧 \(\lVert q-c\rVert\) 在进入分区时计算一次，在线只做乘法：
 
 ```text
-lower_bound = estimate - error_factor * ||q-c||
+Δ = error_factor * ||q-c||          # 离线 E × 在线 F
+lower_bound = estimate - Δ
 ```
 
 如果这个下界已经不可能进入当前 top-k，候选就可跳过更贵的多比特距离计算。这里仍然是高概率剪枝，而非数学上“永不误剪”的严格下界。Lance v10.0.0 也不会无条件启用它：该门控用于具备 raw-query 估计器和误差因子的多比特 `IVF_RQ` 正常扫描；单比特、快速近似模式或缺少误差因子时会绕过门控。
