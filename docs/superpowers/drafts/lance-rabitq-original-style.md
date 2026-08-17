@@ -29,18 +29,19 @@ z=Wr.
 $$
 
 理论推导把 \(W\) 建模为正交旋转：它不改变残差范数，却会打散“能量集中在少数坐标”
-的坏情形。旋转后，只保留每个坐标的符号，构造
+的坏情形。旋转后，只保留每个坐标的符号，构造量化向量 \(u\)。这里用单个字母表示整条符号码，
+避免写成两个字母时被读成向量乘积：
 
 $$
-bf_i=
+u_i=
 \begin{cases}
 +0.5, & z_i\text{ 的符号为正},\\
 -0.5, & \text{否则}.
 \end{cases}
 $$
 
-于是 \(\lVert bf\rVert^2=d/4\)，而一条向量的基础码只需每维 1 bit。这里的关键不是把
-\(r\) 重构成某个缩放后的 \(bf\)，而是让 \(bf\) 成为后续**内积比值估计器**的方向代理。
+于是 \(\lVert u\rVert^2=d/4\)，而一条向量的基础码只需每维 1 bit。这里的关键不是把
+\(r\) 重构成某个缩放后的 \(u\)，而是让 \(u\) 成为后续**内积比值估计器**的方向代理。
 原始的 \(\lVert r\rVert^2\) 会作为数据侧辅助量精确保留，不需要从二值码的范数反推。
 
 Lance 提供两种彼此独立的旋转选项：
@@ -75,28 +76,74 @@ $$
 - 查询侧的 \(\lVert q-c\rVert^2\) 是 `query_factor`；
 - 数据侧的 \(\lVert r\rVert^2\) 是预存的残差平方范数。
 
-只有交叉项 \(\langle q-c,r\rangle\) 需要近似。旋转保持内积关系，RaBitQ 用
+只有交叉项 \(\langle q-c,r\rangle\) 需要近似。因为理论模型把 \(W\) 视为正交变换，
+内积在旋转前后不变：
+
+$$
+\langle q-c,r\rangle=\langle W(q-c),Wr\rangle.
+$$
+
+再把旋转后的残差和查询残差写成单位向量
+
+$$
+\hat z=\frac{Wr}{\lVert r\rVert},\qquad
+\hat y=\frac{W(q-c)}{\lVert q-c\rVert},
+$$
+
+交叉项就是两个已知范数乘上一个余弦：
+
+$$
+\langle q-c,r\rangle=\lVert r\rVert\lVert q-c\rVert\langle\hat z,\hat y\rangle.
+$$
+
+符号码 \(u\) 只是 \(\hat z\) 的方向代理，并不把 \(Wr\) 欧氏重建成某个 \(\alpha u\)。
+RaBitQ 用 \(u\) 同时测量真实单位残差和查询单位残差，再取比值来估计这个余弦；这也是
+官方 estimator 中 \(\langle\bar o,q\rangle/\langle\bar o,o\rangle\) 的坐标形式：
+
+$$
+\langle\hat z,\hat y\rangle
+\approx
+\frac{\langle u,\hat y\rangle}{\langle u,\hat z\rangle}.
+$$
+
+把单位向量还原成未归一化内积后，\(\lVert q-c\rVert\) 在乘回交叉项时相消：
+
+$$
+\frac{\langle u,\hat y\rangle}{\langle u,\hat z\rangle}
+=
+\frac{\langle W(q-c),u\rangle/\lVert q-c\rVert}
+{\langle Wr,u\rangle/\lVert r\rVert}
+=
+\lVert r\rVert
+\frac{\langle W(q-c),u\rangle}{\langle Wr,u\rangle\,\lVert q-c\rVert}.
+$$
+
+因此
 
 $$
 \langle q-c,r\rangle
 \approx
 \lVert r\rVert^2
-\frac{\langle W(q-c),bf\rangle}{\langle Wr,bf\rangle}.
+\frac{\langle W(q-c),u\rangle}{\langle Wr,u\rangle}.
 $$
+
+这个比值对 \(u\) 的整体尺度不敏感：把 \(u\) 改成 \(ku\) 后分子分母同乘 \(k\)。
+坐标取 \(\pm 0.5\) 只是为了和 \(\{0,1\}\) 存储码的中心化一致，并不要求
+\(\lVert u\rVert=1\)。
 
 注意 \(W(q-c)=Wq-Wc\)，所以查询热路径实际需要的旋转坐标内积是
-\(\langle Wq,bf\rangle\) 和 \(\langle Wc,bf\rangle\)，而不是把旋转前后的量混写：
+\(\langle Wq,u\rangle\) 和 \(\langle Wc,u\rangle\)，而不是把旋转前后的量混写：
 
 $$
-\langle W(q-c),bf\rangle
-=\langle Wq,bf\rangle-\langle Wc,bf\rangle.
+\langle W(q-c),u\rangle
+=\langle Wq,u\rangle-\langle Wc,u\rangle.
 $$
 
 记
 
 $$
-\text{binary\_res\_dot}=\langle Wr,bf\rangle,\qquad
-\text{binary\_cent\_dot}=\langle Wc,bf\rangle.
+\text{binary\_res\_dot}=\langle Wr,u\rangle,\qquad
+\text{binary\_cent\_dot}=\langle Wc,u\rangle.
 $$
 
 `transform.rs` 中的 `compute_raw_query_factors` 把 L2 估计器整理为三个部分：
@@ -121,7 +168,7 @@ binary_dot = binary_ip - 0.5 * sum(rotated_query)
 estimate = binary_dot * scale + add + query
 ```
 
-其中 `binary_dot` 正是 \(\langle Wq,bf\rangle\) 的实现形式。这样组织有两个工程收益：
+其中 `binary_dot` 正是 \(\langle Wq,u\rangle\) 的实现形式。这样组织有两个工程收益：
 查询只需旋转一次；每条数据只携带自己的 `add`、`scale` 和二值码，就能复用同一份查询
 结果。更重要的是，这个公式清楚地区分了**精确的平方范数项**与**近似的交叉内积项**：
 误差来自方向估计，不来自把 \(\lVert r\rVert^2\) 当成量化范数。
@@ -134,10 +181,10 @@ estimate = binary_dot * scale + add + query
 $$
 \text{alignment}
 =
-\frac{\lVert r\rVert^2\lVert bf\rVert^2}
-{\langle Wr,bf\rangle^2},
+\frac{\lVert r\rVert^2\lVert u\rVert^2}
+{\langle Wr,u\rangle^2},
 \qquad
-\lVert bf\rVert^2=\frac d4,
+\lVert u\rVert^2=\frac d4,
 $$
 
 以及
@@ -174,7 +221,7 @@ R_{\mathrm{L2}}
 \frac{
 \max\left(
 \frac{\lVert r\rVert^2(d/4)}
-{\langle Wr,bf\rangle^2}-1,
+{\langle Wr,u\rangle^2}-1,
 0
 \right)}
 {d-1}
@@ -269,7 +316,7 @@ RaBitQ 的精髓不是“用 1 bit 重构向量”，而是用随机旋转后的
 内积估计器：
 
 - \(\lVert r\rVert^2\) 始终作为精确项保留；
-- \(\langle Wq,bf\rangle\) 与 \(\langle Wc,bf\rangle\) 共同近似交叉项；
+- \(\langle Wq,u\rangle\) 与 \(\langle Wc,u\rangle\) 共同近似交叉项；
 - 完整 L2 误差半径同时包含系数 \(2\)、\(\lVert r\rVert\) 和
   \(\lVert q-c\rVert\)；
 - 多比特编码先逐向量优化 \(t\)，再落入对称半整数网格；

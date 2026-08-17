@@ -80,12 +80,12 @@ Use these exact facts:
 ```text
 r = o - c
 z = W r
-bf_i = +0.5 when z_i is sign-positive, otherwise -0.5
-binary_res_dot = <z, bf>
-binary_cent_dot = <Wc, bf>
+u_i = +0.5 when z_i is sign-positive, otherwise -0.5
+binary_res_dot = <z, u>
+binary_cent_dot = <Wc, u>
 L2 add = ||r||² + 2 ||r||² binary_cent_dot / binary_res_dot
 L2 scale = -2 ||r||² / binary_res_dot
-alignment = ||r||² ||bf||² / <z,bf>², with ||bf||² = d/4
+alignment = ||r||² ||u||² / <z,u>², with ||u||² = d/4
 angular_error = sqrt(max(alignment - 1, 0) / (d - 1))
 L2 error_factor = 2 ||r|| epsilon_0 angular_error
 query_error = ||q-c||
@@ -135,8 +135,9 @@ The document must contain:
 Required corrections:
 
 ```text
-- Explain that ||r||² remains exact; do not derive from ||alpha bf||² ≈ ||r||².
-- Write rotated inner products as <Wq,bf> and <Wc,bf>.
+- Explain that ||r||² remains exact; do not derive from ||alpha u||² ≈ ||r||².
+- Write rotated inner products as <Wq,u> and <Wc,u>.
+- Derive <q-c,r> ≈ ||r||² <W(q-c),u> / <Wr,u> from the unit-residual ratio <ẑ,ŷ> ≈ <u,ŷ>/<u,ẑ>.
 - Describe Fast rotation as four FHT-Kac rounds, with Matrix as a separate option.
 - Give the complete L2 error radius, including 2 and ||q-c||.
 - State that lower-bound gating is a high-probability mechanism for eligible multi-bit IVF_RQ scans.
@@ -251,7 +252,7 @@ Keep only these formulas:
 ```text
 r = o - c, z = Wr
 d²(q,o) = ||q-c||² + ||r||² - 2<q-c,r>
-<q-c,r> ≈ ||r||² <W(q-c),bf> / <Wr,bf>
+<q-c,r> ≈ ||r||² <W(q-c),u> / <Wr,u>
 lower_bound = estimate - error_factor * ||q-c||
 ```
 

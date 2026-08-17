@@ -54,16 +54,17 @@ RaBitQ 先用同一个随机正交变换处理数据和查询，使能量更均�
 z=Wr.
 \]
 
-`pack_sign_bits` 对每维写一个符号位：`is_sign_positive()` 为真写 1，否则写 0，且每字节采用低位优先。为了把 \(\{0,1\}\) 码变为以零为中心的向量，估计器使用
+`pack_sign_bits` 对每维写一个符号位：`is_sign_positive()` 为真写 1，否则写 0，且每字节采用低位优先。为了把 \(\{0,1\}\) 码变为以零为中心的向量，估计器使用单个符号 \(u\) 表示整条量化向量，
+避免写成两个字母时被读成向量乘积：
 
 \[
-bf_d=b_d-\frac12\in\left\{-\frac12,+\frac12\right\}.
+u_d=b_d-\frac12\in\left\{-\frac12,+\frac12\right\}.
 \]
 
 因此数据端计算的 `binary_res_dot` 是
 
 \[
-z^\mathsf{T}bf=\frac12\sum_d |z_d|,
+z^\mathsf{T}u=\frac12\sum_d |z_d|,
 \]
 
 而码向量的平方范数固定为 \(d/4\)。这解释了源码中看似特殊的 `0.5`：它不是查询侧随意加入的校正，而是 \(\{0,1\}\) 存储表示与 \(\{-0.5,+0.5\}\) 数学表示之间的中心化约定。
@@ -77,7 +78,7 @@ z^\mathsf{T}bf=\frac12\sum_d |z_d|,
 于是实际需要的中心化内积为
 
 \[
-(Wq)^\mathsf{T}bf
+(Wq)^\mathsf{T}u
 =\texttt{binary\_ip}-\frac12\sum_d(Wq)_d.
 \]
 
@@ -96,12 +97,38 @@ lower_bound = estimate - margin
 
 这里 `binary_ip` 来自分区内批量码扫描；`scale_factor`、`add_factor`、`error_factor` 随数据行存储；`query_factor` 和 `query_error` 随“查询 × IVF 分区”计算。数据行与查询的变量因此在最后几次乘加中才汇合，不需要恢复 \(r\) 或 \(o\)。
 
+几何上，L2 只近似交叉内积。正交旋转给出
+
+\[
+\langle q-c,r\rangle=\langle W(q-c),Wr\rangle=\lVert r\rVert\lVert q-c\rVert\langle\hat z,\hat y\rangle,
+\]
+
+其中 \(\hat z=Wr/\lVert r\rVert\)，\(\hat y=W(q-c)/\lVert q-c\rVert\)。1-bit 码 \(u\) 是 \(\hat z\) 的方向代理。按 RaBitQ estimator，用与 \(u\) 的内积比值估计这两个单位向量的内积：
+
+\[
+\langle\hat z,\hat y\rangle
+\approx
+\frac{\langle u,\hat y\rangle}{\langle u,\hat z\rangle}
+=\lVert r\rVert\frac{\langle W(q-c),u\rangle}{\langle Wr,u\rangle\,\lVert q-c\rVert},
+\]
+
+因此
+
+\[
+\langle q-c,r\rangle
+\approx
+\lVert r\rVert^2
+\frac{\langle W(q-c),u\rangle}{\langle Wr,u\rangle}.
+\]
+
+查询热路径再把 \(\langle W(q-c),u\rangle\) 拆成 \(\langle Wq,u\rangle-\langle Wc,u\rangle\)，并把已知的 \(\lVert r\rVert^2/\langle Wr,u\rangle\) 折进每行 `scale_factor` 与 `add_factor`。这不是用 \(\alpha u\) 去欧氏重建 \(r\) 后再展开距离。
+
 对 L2 和 Dot，`compute_raw_query_factors` 使用不同的仿射系数，但共享同一个几何结构。记
 
 \[
 n=\lVert r\rVert^2,\quad
-\beta=z^\mathsf{T}bf,\quad
-\gamma=(Wc)^\mathsf{T}bf.
+\beta=z^\mathsf{T}u,\quad
+\gamma=(Wc)^\mathsf{T}u.
 \]
 
 二值估计器的数据端系数为：
