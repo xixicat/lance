@@ -149,7 +149,7 @@ Required corrections:
 Run:
 
 ```bash
-rg -n '能量守恒近似|千万分之一|80%|IVF_HNSW_RQ|一行代码都不需要改|严格安全|绝对安全' \
+rg -n '能量守恒近似|千万分之一|80%|IVF_HNSW_RQ[[:space:]]*(已支持|已经支持|可构建|可以构建|is supported|supported)|(公开)?支持[[:space:]]*IVF_HNSW_RQ|一行代码都不需要改|严格安全|绝对安全' \
   docs/superpowers/drafts/lance-rabitq-original-style.md
 ```
 
@@ -262,7 +262,7 @@ Explain probability bounds and compression overhead in plain language. Do not in
 Run:
 
 ```bash
-python - <<'PY'
+python3 - <<'PY'
 from pathlib import Path
 
 root = Path("docs/superpowers/drafts")
@@ -311,8 +311,9 @@ Expected: all three article commits are present on the remote branch.
 Run:
 
 ```bash
-python - <<'PY'
+python3 - <<'PY'
 from pathlib import Path
+import re
 
 root = Path("docs/superpowers/drafts")
 paths = sorted(root.glob("lance-rabitq-*.md"))
@@ -329,7 +330,10 @@ forbidden = [
     "e1dbd14288b40cc4f83264328bbc336f4c697dc9",
     "千万分之一",
     "80% 磁盘",
-    "IVF_HNSW_RQ",
+]
+unsupported_claim_patterns = [
+    r"IVF_HNSW_RQ\s*(?:已支持|已经支持|可构建|可以构建|is supported|supported\b)",
+    r"(?:公开)?支持\s*IVF_HNSW_RQ",
 ]
 
 for path in paths:
@@ -341,6 +345,10 @@ for path in paths:
         assert value in text, (path, value)
     for value in forbidden:
         assert value not in text, (path, value)
+    for pattern in unsupported_claim_patterns:
+        assert not re.search(pattern, text), (path, pattern)
+    if "IVF_HNSW_RQ" in text:
+        assert "unsupported" in text, path
     print(f"PASS {path}: {len(text)} chars")
 PY
 ```
