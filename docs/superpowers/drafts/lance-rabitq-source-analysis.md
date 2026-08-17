@@ -34,14 +34,15 @@ RaBitQ 先用同一个随机正交变换处理数据和查询，使能量更均�
 
 ### Fast：无矩阵的四轮随机变换
 
-默认的 `Fast` 路径只保存随机符号位，不物化稠密矩阵。`apply_fast_rotation` 运行固定四轮：
+默认的 `Fast` 路径只保存随机符号位，不物化稠密矩阵。`apply_fast_rotation` 固定运行四轮。当 \(d\) 是 2 的幂时，每一轮都是“Rademacher 随机符号翻转 → 全向量原地 FWHT → 乘 \(1/\sqrt d\) 归一化”。
 
-1. 用 Rademacher 随机位翻转各坐标符号；
-2. 在一个 2 的幂长度窗口上执行原地 FWHT；
-3. 乘 \(1/\sqrt{m}\) 做尺度归一；
-4. 非 2 的幂维度还在轮次间加入固定角度的 Kac 式成对混合。
+当 \(d\) 不是 2 的幂时，令 \(m\) 为不大于 \(d\) 的最大 2 的幂。四轮中的**每一轮**都严格执行：
 
-当 \(d\) 是 2 的幂时，每轮都覆盖全向量；否则取不大于 \(d\) 的最大 2 的幂 \(m\)，偶数轮处理头部窗口，奇数轮处理尾部窗口，每轮随后执行 Kac mixing。[`rotation.rs`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/rotation.rs#L12-L205) 给出了完整流水线；符号翻转在 x86 上还会按运行时能力选择 AVX2。
+1. Rademacher 随机符号翻转；
+2. 交替在 head（偶数轮）或 tail（奇数轮）的 \(m\) 维窗口执行原地 FWHT，并乘 \(1/\sqrt m\) 归一化；
+3. 随后对整个输出执行一次固定角度的 Kac 式成对混合。
+
+第四轮也包含 Kac mixing；四轮全部结束后，源码还对整个输出乘 `0.25`，补偿交替截断 FWHT 与 Kac 步骤带来的尺度变化。[`rotation.rs`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/rotation.rs#L12-L209) 给出了完整流水线；符号翻转在 x86 上还会按运行时能力选择 AVX2。
 
 两种旋转的协议相同：数据、查询、质心必须使用同一份旋转元数据。分布式 `IVF_RQ` 因而允许通过 `RQBuildParams::rotation` 注入同一个预构建模型，避免不同 shard 各自生成随机旋转。
 
@@ -146,7 +147,7 @@ n=\lVert r\rVert^2,\quad
 \sqrt n\times 1.9\times\texttt{angular\_error}.
 \]
 
-常量 [`RABIT_ERROR_EPSILON`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L35) 在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(d\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L117-L137) 是这一计算的唯一实现。
+常量 [`RABIT_ERROR_EPSILON`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L35) 对应 RaBitQ estimator 中的 \(\epsilon_0\)，在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(d\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L117-L137) 是这一计算的唯一实现。
 
 查询侧的 `query_error` 提供另一半尺度：L2 对 `dist_q_c.max(0.0)` 开方；Dot 在有旋转质心时计算 \(\lVert Rq-Rc\rVert\)，没有时对 `dist_q_c.max(0.0)` 开方。最终误差裕量不是两个误差相加，而是明确相乘：
 
@@ -162,16 +163,18 @@ n=\lVert r\rVert^2,\quad
 =\texttt{estimate}-\texttt{margin}.
 \]
 
-只有同时满足以下条件时，这个下界才进入 top-k gating：
+这里的“下界”具有概率语义，而非逐候选的确定性认证语义：\(\epsilon_0=1.9\) 控制针对随机旋转的高概率置信界，但置信界仍存在失效概率。只有在该置信事件成立时，`lower_bound` 才是真实距离的下界；源码没有把它变成对每个候选都必然成立的 certified bound。本文不从 `1.9` 杜撰具体失效概率数字；其统计含义应以 [RaBitQ estimator 文档](https://vectordb-ntu.github.io/RaBitQ-Library/rabitq/estimator/) 和论文为准。
+
+只有同时满足以下条件时，这个概率下界才进入 top-k gating：
 
 1. `approx_mode != ApproxMode::Fast`；
 2. 元数据使用 `RabitQueryEstimator::RawQuery`；
 3. `num_bits > 1`；
 4. 索引确实带有 `error_factors`。
 
-任一条件不满足，源码分别记录 `approx_mode_fast`、`residual_query_estimator`、`num_bits_le_one` 或 `missing_error_factors`，然后绕过下界 gating，走完整距离计算。[`raw_query_lower_bound_gating_disabled_reason`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs#L1504-L1517) 给出了精确门槛。
+这些原因都绕过 lower-bound gating，但后续计算并不相同：`ApproxMode::Fast` 或 `num_bits == 1` 使用 1-bit raw-query 距离；`ResidualQuery` 使用其兼容估计路径；只有缺少 `error_factors` 的适用多比特 `RawQuery` 才在不做 gating 的情况下计算完整 ex-code 距离。[`raw_query_lower_bound_gating_disabled_reason`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs#L1504-L1517) 给出禁用原因，[`distance_all_with_scratch`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs#L1813-L1852) 决定相应 fallback。
 
-通过 gating 时，候选若满足 `lower_bound >= query_upper_bound`，或在堆已满后满足 `lower_bound >= heap_threshold`，即可剪枝；其余候选才读取 ex-code 做更精确的多比特重估。下界只负责拒绝，不作为最终候选距离写入 top-k 堆。
+在置信界成立事件内，候选若满足 `lower_bound >= query_upper_bound`，或在堆已满后满足 `lower_bound >= heap_threshold`，可据此剪枝；其余候选才读取 ex-code 做更精确的多比特重估。概率下界只负责拒绝，不作为最终候选距离写入 top-k 堆。
 
 ## 7. 多比特 ex-code 与增量重估
 
@@ -251,15 +254,18 @@ Cannot build a fresh IVF_HNSW_RQ segment: this index type is unsupported
 
 ## 10. 总结
 
-Lance `v10.0.0` 的 RaBitQ 路径可以浓缩为一个分层估计系统：IVF 产生残差和候选分区；随机旋转把能量打散；1-bit 符号码提供可批量查表的基础内积；每行 `scale/add/error` 因子与每分区 `query/query_error` 因子把内积变成带概率裕量的距离下界；多比特 ex-code 只为未被下界剪掉的候选增量重估。
+Lance `v10.0.0` 的 RaBitQ 路径可以浓缩为一个分层估计系统：IVF 产生残差和候选分区；随机旋转把能量打散；1-bit 符号码提供可批量查表的基础内积；每行 `scale/add/error` 因子与每分区 `query/query_error` 因子把内积变成带概率裕量、仅在置信事件成立时有效的高概率距离下界；多比特 ex-code 只为未被该概率下界剪掉的候选增量重估。
 
 性能设计与数值正确性在这里相互约束。距离表和 ex-code 点积尽量利用 AVX-512、AVX2/FMA 或 NEON；真正决定剪枝的 16-lane 内核却刻意不用 FMA，以复现标量舍入顺序。理解这条边界，也就理解了该实现为何既保存两套因子、两层码，又把“粗估—下界—精估”拆成三个明确阶段。
 
 ## 参考资料
 
-1. [Lance `v10.0.0` 源码树（固定提交）](https://github.com/lance-format/lance/tree/95f2f36b22043c3face00afe088c34e0742d01df)
-2. [Lance RaBitQ 构建与量化实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/builder.rs)
-3. [Lance RaBitQ 因子生成实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs)
-4. [Lance RaBitQ 查询与存储实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs)
-5. [Lance RaBitQ 下界 SIMD 内核](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/prune.rs)
-6. [RaBitQ-Library](https://github.com/VectorDB-NTU/RaBitQ-Library)
+1. [RaBitQ 论文（DOI）](https://doi.org/10.1145/3654970)
+2. [RaBitQ-Library estimator 文档](https://vectordb-ntu.github.io/RaBitQ-Library/rabitq/estimator/)
+3. [Lance `v10.0.0` 标签](https://github.com/lance-format/lance/tree/v10.0.0)
+4. [Lance `v10.0.0` 源码树（固定提交）](https://github.com/lance-format/lance/tree/95f2f36b22043c3face00afe088c34e0742d01df)
+5. [Lance RaBitQ 构建与量化实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/builder.rs)
+6. [Lance RaBitQ 因子生成实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs)
+7. [Lance RaBitQ 查询与存储实现](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs)
+8. [Lance RaBitQ 下界 SIMD 内核](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/prune.rs)
+9. [RaBitQ-Library 源码](https://github.com/VectorDB-NTU/RaBitQ-Library)
