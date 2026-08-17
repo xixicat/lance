@@ -6,7 +6,7 @@
 
 ## 1. RaBitQ 在 IVF_RQ 中的位置
 
-Lance 的 `IVF_RQ` 不是把整条向量直接压成比特后做全表扫描。设原始数据向量为 \(o\)，它先用 IVF 将 \(o\) 分到质心 \(c\) 所在的分区，再令残差
+Lance 的 `IVF_RQ` 不是把整条向量直接压成比特后做全表扫描。设原始数据向量为 \(o\)，维度为 \(D\)，它先用 IVF 将 \(o\) 分到质心 \(c\) 所在的分区，再令残差
 
 \[
 r=o-c
@@ -30,13 +30,13 @@ RaBitQ 先用同一个随机正交变换处理数据和查询，使能量更均�
 
 ### Matrix：显式稠密正交矩阵
 
-`RQRotationType::Matrix` 生成随机正交矩阵，并把矩阵本身写入元数据。构建时以矩阵乘法旋转残差；查询时用同一矩阵旋转查询或查询残差。这一路径直观，但需要保存 \(d\times d\) 矩阵，计算和存储成本也随之增加。创建逻辑见 [`rust/lance-index/src/vector/bq/builder.rs::RabitQuantizer::new_with_rotation`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/builder.rs)。
+`RQRotationType::Matrix` 生成随机正交矩阵，并把矩阵本身写入元数据。构建时以矩阵乘法旋转残差；查询时用同一矩阵旋转查询或查询残差。这一路径直观，但需要保存 \(D\times D\) 矩阵，计算和存储成本也随之增加。创建逻辑见 [`rust/lance-index/src/vector/bq/builder.rs::RabitQuantizer::new_with_rotation`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/builder.rs)。
 
 ### Fast：无矩阵的四轮随机变换
 
-默认的 `Fast` 路径只保存随机符号位，不物化稠密矩阵。`apply_fast_rotation` 固定运行四轮。当 \(d\) 是 2 的幂时，每一轮都是“Rademacher 随机符号翻转 → 全向量原地 FWHT → 乘 \(1/\sqrt d\) 归一化”。
+默认的 `Fast` 路径只保存随机符号位，不物化稠密矩阵。`apply_fast_rotation` 固定运行四轮。当 \(D\) 是 2 的幂时，每一轮都是“Rademacher 随机符号翻转 → 全向量原地 FWHT → 乘 \(1/\sqrt D\) 归一化”。
 
-当 \(d\) 不是 2 的幂时，令 \(m\) 为不大于 \(d\) 的最大 2 的幂。四轮中的**每一轮**都严格执行：
+当 \(D\) 不是 2 的幂时，令 \(m\) 为不大于 \(D\) 的最大 2 的幂。四轮中的**每一轮**都严格执行：
 
 1. Rademacher 随机符号翻转；
 2. 交替在 head（偶数轮）或 tail（奇数轮）的 \(m\) 维窗口执行原地 FWHT，并乘 \(1/\sqrt m\) 归一化；
@@ -58,31 +58,31 @@ z=Wr.
 避免写成两个字母时被读成向量乘积：
 
 \[
-u_d=b_d-\frac12\in\left\{-\frac12,+\frac12\right\}.
+u_i=b_i-\frac12\in\left\{-\frac12,+\frac12\right\}.
 \]
 
 因此数据端计算的 `binary_res_dot` 是
 
 \[
-z^\mathsf{T}u=\frac12\sum_d |z_d|,
+z^\mathsf{T}u=\frac12\sum_{i=1}^{D} |z_i|,
 \]
 
-而码向量的平方范数固定为 \(d/4\)。这解释了源码中看似特殊的 `0.5`：它不是查询侧随意加入的校正，而是 \(\{0,1\}\) 存储表示与 \(\{-0.5,+0.5\}\) 数学表示之间的中心化约定。
+而码向量的平方范数固定为 \(D/4\)。这解释了源码中看似特殊的 `0.5`：它不是查询侧随意加入的校正，而是 \(\{0,1\}\) 存储表示与 \(\{-0.5,+0.5\}\) 数学表示之间的中心化约定。
 
 查询侧 FastScan 首先得到
 
 \[
-\texttt{binary\_ip}=\sum_d b_d(Wq)_d.
+\texttt{binary\_ip}=\sum_{i=1}^{D} b_i(Wq)_i.
 \]
 
 于是实际需要的中心化内积为
 
 \[
 (Wq)^\mathsf{T}u
-=\texttt{binary\_ip}-\frac12\sum_d(Wq)_d.
+=\texttt{binary\_ip}-\frac12\sum_{i=1}^{D}(Wq)_i.
 \]
 
-源码把 \(\sum_d(Wq)_d\) 缓存在 `sum_q` 中；[`rust/lance-index/src/vector/bq/storage.rs::binary_distance_factor_params`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs) 和 [`rust/lance-index/src/vector/bq/storage.rs::raw_query_binary_distance`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs) 正是这套约定的查询端落点。
+源码把 \(\sum_{i=1}^{D}(Wq)_i\) 缓存在 `sum_q` 中；[`rust/lance-index/src/vector/bq/storage.rs::binary_distance_factor_params`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs) 和 [`rust/lance-index/src/vector/bq/storage.rs::raw_query_binary_distance`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/storage.rs) 正是这套约定的查询端落点。
 
 ## 4. 不依赖向量重构的距离估计器
 
@@ -157,7 +157,7 @@ Indexing 把 A、C 以及下一节的误差数据项 E 固化到每行；Online 
 
 ```text
 +------------------------+------------------+---------------------+---------------------+
-| 1-bit bitmap (d bits)  | add (float32)    | scale (float32)     | error (float32)     |
+| 1-bit bitmap (D bits)  | add (float32)    | scale (float32)     | error (float32)     |
 +------------------------+------------------+---------------------+---------------------+
 ```
 
@@ -171,10 +171,10 @@ Indexing 把 A、C 以及下一节的误差数据项 E 固化到每行；Online 
 
 \[
 \langle Wq,u\rangle
-=\texttt{binary\_ip}-\frac12\sum_d(Wq)_d.
+=\texttt{binary\_ip}-\frac12\sum_{i=1}^{D}(Wq)_i.
 \]
 
-\(\sum_d(Wq)_d\) 缓存在 `sum_q` 中，每个查询计算一次；`binary_ip` 才是分区内 FastScan 的高频计算。在线极简式是
+\(\sum_{i=1}^{D}(Wq)_i\) 缓存在 `sum_q` 中，每个查询计算一次；`binary_ip` 才是分区内 FastScan 的高频计算。在线极简式是
 
 ```text
 binary_dot = binary_ip - 0.5 * sum(rotated_query)
@@ -198,18 +198,18 @@ B 和 F 都依赖质心 \(c\)，因此是“查询 × 所探测 IVF 分区”级
 
 ## 6. 概率误差界如何变成查询下界
 
-1-bit 估计不是精确距离。构建端根据旋转残差与符号码的对齐程度生成 `error_factor`。令码维度为 \(d\)，则源码先计算
+1-bit 估计不是精确距离。构建端根据旋转残差与符号码的对齐程度生成 `error_factor`。令码维度为 \(D\)，则源码先计算
 
 \[
 \texttt{alignment}
-=\frac{n(d/4)}{\beta^2},
+=\frac{n(D/4)}{\beta^2},
 \]
 
 再计算
 
 \[
 \texttt{angular\_error}
-=\sqrt{\frac{\max(\texttt{alignment}-1,0)}{d-1}}.
+=\sqrt{\frac{\max(\texttt{alignment}-1,0)}{D-1}}.
 \]
 
 基础误差为
@@ -218,7 +218,7 @@ B 和 F 都依赖质心 \(c\)，因此是“查询 × 所探测 IVF 分区”级
 \sqrt n\times 1.9\times\texttt{angular\_error}.
 \]
 
-常量 [`rust/lance-index/src/vector/bq/transform.rs::RABIT_ERROR_EPSILON`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs) 对应 RaBitQ estimator 中的 \(\epsilon_0\)，在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(d\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`rust/lance-index/src/vector/bq/transform.rs::error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs) 是这一计算的唯一实现。这是 RaBitQ 的高概率角误差因子，不是柯西–施瓦茨下的重构残差 \(2\lVert r-\alpha u\rVert\)。
+常量 [`rust/lance-index/src/vector/bq/transform.rs::RABIT_ERROR_EPSILON`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs) 对应 RaBitQ estimator 中的 \(\epsilon_0\)，在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(D\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`rust/lance-index/src/vector/bq/transform.rs::error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs) 是这一计算的唯一实现。这是 RaBitQ 的高概率角误差因子，不是柯西–施瓦茨下的重构残差 \(2\lVert r-\alpha u\rVert\)。
 
 查询侧的 `query_error` 提供另一半尺度：L2 对 `dist_q_c.max(0.0)` 开方；Dot 在有旋转质心时计算 \(\lVert Wq-Wc\rVert=\lVert W(q-c)\rVert\)，没有时对 `dist_q_c.max(0.0)` 开方。误差半径按离线/在线拆开后是
 
@@ -255,7 +255,7 @@ B 和 F 都依赖质心 \(c\)，因此是“查询 × 所探测 IVF 分区”级
 多比特模式没有丢弃 1-bit 符号码，而是在它旁边增加 \(e\) 位 ex-code。构建端先归一化每维绝对值
 
 \[
-a_d=\frac{|z_d|}{\lVert z\rVert},
+a_i=\frac{|z_i|}{\lVert z\rVert},
 \]
 
 再由 `best_ex_rescale_factor` 搜索尺度 \(t\)，使量化码与归一化绝对值的内积目标尽可能大。`EX_TIGHT_START` 的九个精确值为
@@ -264,10 +264,10 @@ a_d=\frac{|z_d|}{\lVert z\rVert},
 [0.0, 0.15, 0.20, 0.52, 0.59, 0.71, 0.75, 0.77, 0.81]
 ```
 
-量化时使用 `1.0e-5` 的 `EX_QUANTIZATION_EPSILON`，把 \(t a_d\) 向下取整并截到 \([0,2^e-1]\)。负坐标会按 \(e\) 位掩码取反 ex-code。记无符号 ex-code 为 \(x_d\)，最终一维中心化码值可写为
+量化时使用 `1.0e-5` 的 `EX_QUANTIZATION_EPSILON`，把 \(t a_i\) 向下取整并截到 \([0,2^e-1]\)。负坐标会按 \(e\) 位掩码取反 ex-code。记无符号 ex-code 为 \(x_i\)，最终一维中心化码值可写为
 
 \[
-g_d=(b_d\ll e)+x_d-\left(2^e-\frac12\right),
+g_i=(b_i\ll e)+x_i-\left(2^e-\frac12\right),
 \]
 
 它仍以 0 为中心。[`rust/lance-index/src/vector/bq/builder.rs::best_ex_rescale_factor` 与 `quantize_ex_code`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/builder.rs) 给出了尺度搜索和有符号码映射。

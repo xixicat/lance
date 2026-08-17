@@ -85,8 +85,8 @@ binary_res_dot = <z, u>
 binary_cent_dot = <Wc, u>
 L2 add = ||r||² + 2 ||r||² binary_cent_dot / binary_res_dot
 L2 scale = -2 ||r||² / binary_res_dot
-alignment = ||r||² ||u||² / <z,u>², with ||u||² = d/4
-angular_error = sqrt(max(alignment - 1, 0) / (d - 1))
+alignment = ||r||² ||u||² / <z,u>², with ||u||² = D/4
+angular_error = sqrt(max(alignment - 1, 0) / (D - 1))
 L2 error_factor = 2 ||r|| epsilon_0 angular_error
 query_error = ||q-c||
 lower_bound = binary_estimate - error_factor * query_error
