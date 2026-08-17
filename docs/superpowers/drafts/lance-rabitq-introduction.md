@@ -73,4 +73,4 @@ lower_bound = estimate - error_factor * ||q-c||
 - [`rust/lance-index/src/vector/bq/storage.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/storage.rs)：`raw_query_lower_bound`、`raw_query_lower_bound_gating_disabled_reason`，对应查询下界及其启用条件。
 - [`rust/lance-index/src/vector/bq.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq.rs)：`validate_rq_num_bits`、`RABIT_MIN_NUM_BITS`、`RABIT_MAX_NUM_BITS`，对应位数校验。
 - [`python/python/lance/indices/builder.py`](https://github.com/lance-format/lance/blob/v10.0.0/python/python/lance/indices/builder.py)：`IndicesBuilder.train_ivf`，对应 IVF 的 k-means 训练。
-- [RaBitQ 论文](https://arxiv.org/abs/2405.12497)
+- [RaBitQ 论文](https://doi.org/10.1145/3654970)
