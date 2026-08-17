@@ -17,26 +17,26 @@ Lance `v10.0.0` 把这条链路拆成了可向量化的查询热路径。下文�
 
 ## 1. 算法破局点：随机正交旋转
 
-设数据向量为 \(o\)，维度为 \(D\)，它所属 IVF 分区的中心为 \(c\)，残差为
+设数据向量为 \(\mathbf{o}\)，维度为 \(D\)，它所属 IVF 分区的中心为 \(\mathbf{c}\)，残差为
 
 $$
-r=o-c.
+\mathbf{r}=\mathbf{o}-\mathbf{c}.
 $$
 
-RaBitQ 不直接量化 \(r\)，而是先施加旋转 \(W\)，得到 \(z=Wr\)。理论模型把 \(W\) 视为
+RaBitQ 不直接量化 \(\mathbf{r}\)，而是先施加旋转 \(\mathbf{W}\)，得到 \(\mathbf{z}=\mathbf{W}\mathbf{r}\)。理论模型把 \(\mathbf{W}\) 视为
 正交变换：它不改变残差范数和内积，却会打散“能量集中在少数坐标”的坏情形。旋转后
-只保留每个坐标的符号，构造量化向量 \(u\)（单个字母，以免被读成两个向量的乘积）：
+只保留每个坐标的符号，构造量化向量 \(\mathbf{u}\)（单个字母，以免被读成两个向量的乘积）：
 
 $$
-u_i=
+\mathbf{u}_i=
 \begin{cases}
-+0.5, & z_i\text{ 的符号为正},\\
++0.5, & \mathbf{z}_i\text{ 的符号为正},\\
 -0.5, & \text{否则}.
 \end{cases}
 $$
 
-于是 \(\lVert u\rVert^2=D/4\)，基础码每维只需 1 bit。\(u\) 是后续内积比值估计器的
-方向代理，不是用来把 \(r\) 欧氏重建成某个 \(\alpha u\)。原始的 \(\lVert r\rVert^2\)
+于是 \(\lVert \mathbf{u}\rVert^2=D/4\)，基础码每维只需 1 bit。\(\mathbf{u}\) 是后续内积比值估计器的
+方向代理，不是用来把 \(\mathbf{r}\) 欧氏重建成某个 \(\alpha \mathbf{u}\)。原始的 \(\lVert \mathbf{r}\rVert^2\)
 会作为数据侧辅助量精确保留。
 
 Lance 提供两种彼此独立的旋转选项：
@@ -55,64 +55,64 @@ Lance 提供两种彼此独立的旋转选项：
 以 L2 为例。极化恒等式把距离拆成两项精确量和一项交叉内积：
 
 $$
-\lVert q-o\rVert^2
-=\lVert q-c\rVert^2+\lVert r\rVert^2-2\langle q-c,r\rangle.
+\lVert \mathbf{q}-\mathbf{o}\rVert^2
+=\lVert \mathbf{q}-\mathbf{c}\rVert^2+\lVert \mathbf{r}\rVert^2-2\langle \mathbf{q}-\mathbf{c},\mathbf{r}\rangle.
 $$
 
-\(\lVert q-c\rVert^2\) 在查询时按分区计算，\(\lVert r\rVert^2\) 在建索引时预存。
-只需近似 \(\langle q-c,r\rangle\)。
+\(\lVert \mathbf{q}-\mathbf{c}\rVert^2\) 在查询时按分区计算，\(\lVert \mathbf{r}\rVert^2\) 在建索引时预存。
+只需近似 \(\langle \mathbf{q}-\mathbf{c},\mathbf{r}\rangle\)。
 
-因为 \(W\) 正交，内积不变。把旋转后的残差和查询残差写成单位向量
-\(\hat z=Wr/\lVert r\rVert\)、\(\hat y=W(q-c)/\lVert q-c\rVert\)，交叉项就是余弦：
-
-$$
-\langle q-c,r\rangle=\langle W(q-c),Wr\rangle=\lVert r\rVert\lVert q-c\rVert\langle\hat z,\hat y\rangle.
-$$
-
-\(u\) 只代理 \(\hat z\) 的方向。RaBitQ 用它同时测量两个单位向量，再取比值估计余弦
-——与官方 estimator 中的 \(\langle\bar o,q\rangle/\langle\bar o,o\rangle\) 相同。
-\(\lVert q-c\rVert\) 在代回交叉项时消去，得到
+因为 \(\mathbf{W}\) 正交，内积不变。把旋转后的残差和查询残差写成单位向量
+\(\hat{\mathbf{z}}=\mathbf{W}\mathbf{r}/\lVert \mathbf{r}\rVert\)、\(\hat{\mathbf{y}}=\mathbf{W}(\mathbf{q}-\mathbf{c})/\lVert \mathbf{q}-\mathbf{c}\rVert\)，交叉项就是余弦：
 
 $$
-\langle q-c,r\rangle
+\langle \mathbf{q}-\mathbf{c},\mathbf{r}\rangle=\langle \mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{W}\mathbf{r}\rangle=\lVert \mathbf{r}\rVert\lVert \mathbf{q}-\mathbf{c}\rVert\langle\hat{\mathbf{z}},\hat{\mathbf{y}}\rangle.
+$$
+
+\(\mathbf{u}\) 只代理 \(\hat{\mathbf{z}}\) 的方向。RaBitQ 用它同时测量两个单位向量，再取比值估计余弦
+——与官方 estimator 中的 \(\langle\bar{\mathbf{o}},\mathbf{q}\rangle/\langle\bar{\mathbf{o}},\mathbf{o}\rangle\) 相同。
+\(\lVert \mathbf{q}-\mathbf{c}\rVert\) 在代回交叉项时消去，得到
+
+$$
+\langle \mathbf{q}-\mathbf{c},\mathbf{r}\rangle
 \approx
-\lVert r\rVert^2
-\frac{\langle W(q-c),u\rangle}{\langle Wr,u\rangle}.
+\lVert \mathbf{r}\rVert^2
+\frac{\langle \mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{u}\rangle}{\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle}.
 $$
 
-该比值对 \(u\) 的整体尺度不敏感，所以坐标取 \(\pm 0.5\) 只是为了和 \(\{0,1\}\) 存储码
-中心化一致，并不要求 \(\lVert u\rVert=1\)。
+该比值对 \(\mathbf{u}\) 的整体尺度不敏感，所以坐标取 \(\pm 0.5\) 只是为了和 \(\{0,1\}\) 存储码
+中心化一致，并不要求 \(\lVert \mathbf{u}\rVert=1\)。
 
-查询热路径再把 \(\langle W(q-c),u\rangle=\langle Wq,u\rangle-\langle Wc,u\rangle\) 代回
-L2 展开。与质心有关的一半并进每行离线因子，热路径只对每条码计算 \(\langle Wq,u\rangle\)。
+查询热路径再把 \(\langle \mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{u}\rangle=\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle-\langle \mathbf{W}\mathbf{c},\mathbf{u}\rangle\) 代回
+L2 展开。与质心有关的一半并进每行离线因子，热路径只对每条码计算 \(\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle\)。
 按 **Indexing / Online** 标出后：
 
 $$
 \begin{aligned}
-\hat{d}^{2}(q,o)
+\hat{d}^{2}(\mathbf{q},\mathbf{o})
 &=
-\underbrace{\lVert q-c\rVert^{2}}_{\text{在线 B：query}}
+\underbrace{\lVert \mathbf{q}-\mathbf{c}\rVert^{2}}_{\text{在线 B：query}}
 +
-\underbrace{\Biggl(\lVert r\rVert^{2}
-+\frac{2\lVert r\rVert^{2}\langle Wc,u\rangle}{\langle Wr,u\rangle}\Biggr)}_{\text{离线 A：add}}
+\underbrace{\Biggl(\lVert \mathbf{r}\rVert^{2}
++\frac{2\lVert \mathbf{r}\rVert^{2}\langle \mathbf{W}\mathbf{c},\mathbf{u}\rangle}{\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle}\Biggr)}_{\text{离线 A：add}}
 \\
 &\quad+
-\underbrace{\Biggl(\frac{-2\lVert r\rVert^{2}}{\langle Wr,u\rangle}\Biggr)}_{\text{离线 C：scale}}
+\underbrace{\Biggl(\frac{-2\lVert \mathbf{r}\rVert^{2}}{\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle}\Biggr)}_{\text{离线 C：scale}}
 \cdot
-\underbrace{\langle Wq,u\rangle}_{\text{在线交互 D}}
+\underbrace{\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle}_{\text{在线交互 D}}
 \end{aligned}
 $$
 
 这正是 `transform.rs` 里 `compute_raw_query_factors` 的 L2 拆分。注意 A **不是**单独的
-\(\lVert r\rVert^{2}\)：质心交叉项已经折进去，D 才能写成对原始旋转查询的内积。B 依赖
+\(\lVert \mathbf{r}\rVert^{2}\)：质心交叉项已经折进去，D 才能写成对原始旋转查询的内积。B 依赖
 当前 IVF 中心，是“查询 × 分区”级常量，不是全库一条。D 是唯一必须对每个候选求的码内积。
 
-\(u_i=b_i-1/2\)，因此 D 落到 \(\{0,1\}\) 码的 SIMD 点积上：
+\(\mathbf{u}_i=b_i-1/2\)，因此 D 落到 \(\{0,1\}\) 码的 SIMD 点积上：
 
 $$
-\langle Wq,u\rangle
+\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle
 =\texttt{binary\_ip}-\frac12\texttt{sum\_q},\qquad
-\texttt{binary\_ip}=\sum_{i=1}^{D}b_i(Wq)_i.
+\texttt{binary\_ip}=\sum_{i=1}^{D}b_i(\mathbf{W}\mathbf{q})_i.
 $$
 
 `sum_q` 每个查询算一次；`binary_ip` 才是分区扫描里的高频查表内积。在线计算因此就是
@@ -135,15 +135,15 @@ estimate   = add + query + scale * binary_dot       # A + B + C·D
 
 | 项 | 公式（L2） | Lance | 阶段 |
 |---|---|---|---|
-| A | \(\lVert r\rVert^{2}+2\lVert r\rVert^{2}\langle Wc,u\rangle/\langle Wr,u\rangle\) | `add` | 离线，每行 |
-| B | \(\lVert q-c\rVert^{2}\) | `query` | 在线，每查询×分区 |
-| C | \(-2\lVert r\rVert^{2}/\langle Wr,u\rangle\) | `scale` | 离线，每行 |
-| D | \(\langle Wq,u\rangle\) | `binary_dot` | 在线，每候选 |
-| E | \(2\lVert r\rVert\epsilon_0\cdot\text{angular\_error}\) | `error` | 离线，每行 |
-| F | \(\lVert q-c\rVert\) | `query_error` | 在线，每查询×分区 |
+| A | \(\lVert \mathbf{r}\rVert^{2}+2\lVert \mathbf{r}\rVert^{2}\langle \mathbf{W}\mathbf{c},\mathbf{u}\rangle/\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle\) | `add` | 离线，每行 |
+| B | \(\lVert \mathbf{q}-\mathbf{c}\rVert^{2}\) | `query` | 在线，每查询×分区 |
+| C | \(-2\lVert \mathbf{r}\rVert^{2}/\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle\) | `scale` | 离线，每行 |
+| D | \(\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle\) | `binary_dot` | 在线，每候选 |
+| E | \(2\lVert \mathbf{r}\rVert\epsilon_0\cdot\text{angular\_error}\) | `error` | 离线，每行 |
+| F | \(\lVert \mathbf{q}-\mathbf{c}\rVert\) | `query_error` | 在线，每查询×分区 |
 
 查询向量只需旋转一次；每条数据只携带三个浮点因子和二值码。误差来自方向估计，不来自把
-\(\lVert r\rVert^{2}\) 当成量化范数。
+\(\lVert \mathbf{r}\rVert^{2}\) 当成量化范数。
 
 ## 3. 概率误差界与下界剪枝
 
@@ -152,7 +152,7 @@ estimate   = add + query + scale * binary_dot       # A + B + C·D
 
 $$
 \text{alignment}
-=\frac{\lVert r\rVert^2(D/4)}{\langle Wr,u\rangle^2},\qquad
+=\frac{\lVert \mathbf{r}\rVert^2(D/4)}{\langle \mathbf{W}\mathbf{r},\mathbf{u}\rangle^2},\qquad
 \text{angular\_error}
 =\sqrt{\frac{\max(\text{alignment}-1,0)}{D-1}}.
 $$
@@ -162,20 +162,20 @@ L2 下 \(\epsilon_0=1.9\)，误差半径按离线/在线拆开为
 $$
 R_{\mathrm{L2}}
 =
-\underbrace{\bigl(2\lVert r\rVert\epsilon_0\cdot\text{angular\_error}\bigr)}_{\text{离线 E：error}}
+\underbrace{\bigl(2\lVert \mathbf{r}\rVert\epsilon_0\cdot\text{angular\_error}\bigr)}_{\text{离线 E：error}}
 \cdot
-\underbrace{\lVert q-c\rVert}_{\text{在线 F：query\_error}}.
+\underbrace{\lVert \mathbf{q}-\mathbf{c}\rVert}_{\text{在线 F：query\_error}}.
 $$
 
 E 随每行写入；F 与 B 一样在探测该分区时计算一次。在线只做一次乘法：
 
 $$
-\Delta(q,o)=\text{error\_factor}\cdot\text{query\_error},\qquad
-\text{lower\_bound}=\hat{d}^{2}(q,o)-\Delta(q,o).
+\Delta(\mathbf{q},\mathbf{o})=\text{error\_factor}\cdot\text{query\_error},\qquad
+\text{lower\_bound}=\hat{d}^{2}(\mathbf{q},\mathbf{o})-\Delta(\mathbf{q},\mathbf{o}).
 $$
 
 这是 RaBitQ 理论的高概率误差控制，不是柯西–施瓦茨的逐点确定性包络，也不是
-\(\lVert r-\alpha u\rVert\) 那种重构残差。Lance 用这个下界与查询上界、当前 top-k 堆阈值
+\(\lVert \mathbf{r}-\alpha \mathbf{u}\rVert\) 那种重构残差。Lance 用这个下界与查询上界、当前 top-k 堆阈值
 比较：下界已经不可能胜出的候选可跳过 ex-code 重估。这是 `IVF_RQ` 分区扫描上的 gating，
 不是 DiskANN / HNSW 图上的三区域确定性剪枝。
 
@@ -218,10 +218,10 @@ IVF + Flat + Rabit；fresh 的 IVF + HNSW + Rabit 会返回 unsupported。源码
 RaBitQ 的精髓不是“用 1 bit 重构向量”，而是用随机旋转后的符号方向建立一个可校准的
 内积估计器：
 
-- \(\lVert r\rVert^2\) 始终作为精确项保留，并与质心交叉项一起折进离线 `add`；
+- \(\lVert \mathbf{r}\rVert^2\) 始终作为精确项保留，并与质心交叉项一起折进离线 `add`；
 - 离线三项是 `add` / `scale` / `error`，在线三项是 `query`、`query_error` 和
-  \(\langle Wq,u\rangle\)；
-- L2 误差半径同时包含系数 \(2\)、\(\lVert r\rVert\) 和 \(\lVert q-c\rVert\)；
+  \(\langle \mathbf{W}\mathbf{q},\mathbf{u}\rangle\)；
+- L2 误差半径同时包含系数 \(2\)、\(\lVert \mathbf{r}\rVert\) 和 \(\lVert \mathbf{q}-\mathbf{c}\rVert\)；
 - 多比特编码先逐向量优化 \(t\)，再落入对称半整数网格；
 - 高概率下界只在满足条件的多比特 `IVF_RQ` 扫描中承担 gating。
 

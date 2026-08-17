@@ -6,11 +6,11 @@
 
 最直接的二值量化只记录每个坐标的正负号。它很省空间，也能把内积变成位运算，但效果依赖坐标轴：同一个向量换一组坐标后，符号分布可能完全不同。若信息集中在少数坐标，丢掉幅值会造成很大的距离误差。
 
-`IVF_RQ` 先用 IVF 把向量分到聚类中心附近。设原向量为 \(o\)，维度为 \(D\)，它所属的中心为 \(c\)，RaBitQ 实际编码的是残差 \(r\)。再用随机正交旋转 \(W\) 把残差变成 \(z\)：
+`IVF_RQ` 先用 IVF 把向量分到聚类中心附近。设原向量为 \(\mathbf{o}\)，维度为 \(D\)，它所属的中心为 \(\mathbf{c}\)，RaBitQ 实际编码的是残差 \(\mathbf{r}\)。再用随机正交旋转 \(\mathbf{W}\) 把残差变成 \(\mathbf{z}\)：
 
-```text
-r = o - c, z = Wr
-```
+$$
+\mathbf{r}=\mathbf{o}-\mathbf{c},\qquad \mathbf{z}=\mathbf{W}\mathbf{r}.
+$$
 
 减去中心缩小了要编码的范围；旋转则把方向信息更均匀地摊到各坐标上，使“只留符号”不再过度依赖原始坐标轴。
 
@@ -22,59 +22,83 @@ Lance v10.0.0 默认采用矩阵无关的快速旋转：四轮随机符号翻转
 
 ## 3. 只保存符号，如何估算距离
 
-对查询向量 \(q\)，L2 距离可以按中心拆开：
+对查询向量 \(\mathbf{q}\)，L2 距离可以按中心拆开：
 
-```text
-d²(q,o) = ||q-c||² + ||r||² - 2<q-c,r>
-```
+$$
+\hat{d}^{2}(\mathbf{q},\mathbf{o})
+=\lVert\mathbf{q}-\mathbf{c}\rVert^{2}
++\lVert\mathbf{r}\rVert^{2}
+-2\langle\mathbf{q}-\mathbf{c},\mathbf{r}\rangle.
+$$
 
 前两项都可以精确获得：查询到中心的距离在查询时计算，残差长度则在建索引时折入每行校正因子。真正需要近似的只有交叉内积。
 
-令 \(u\) 是旋转后残差 \(z=Wr\) 的符号向量：单个字母表示整条量化码，每个坐标取正或负的半单位值。因为正交旋转保持内积，交叉项可以原封不动写到旋转坐标系里，再拆成两个范数和一个余弦：
+令 \(\mathbf{u}\) 是旋转后残差 \(\mathbf{z}=\mathbf{W}\mathbf{r}\) 的符号向量：单个字母表示整条量化码，每个坐标取正或负的半单位值。因为正交旋转保持内积，交叉项可以原封不动写到旋转坐标系里，再拆成两个范数和一个余弦：
 
-```text
-<q-c,r> = <W(q-c), Wr> = ||r|| ||q-c|| <ẑ, ŷ>
-```
+$$
+\langle\mathbf{q}-\mathbf{c},\mathbf{r}\rangle
+=\langle\mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{W}\mathbf{r}\rangle
+=\lVert\mathbf{r}\rVert\lVert\mathbf{q}-\mathbf{c}\rVert\langle\hat{\mathbf{z}},\hat{\mathbf{y}}\rangle,
+$$
 
-其中 \(\hat z=Wr/\lVert r\rVert\)，\(\hat y=W(q-c)/\lVert q-c\rVert\)。\(u\) 并不重构 \(Wr\)，只作为 \(\hat z\) 的方向代理。用 \(u\) 分别点乘这两个单位向量再相除，估计这个余弦——量化向量自身的尺度会在比值里消掉：
+其中 \(\hat{\mathbf{z}}=\mathbf{W}\mathbf{r}/\lVert\mathbf{r}\rVert\)，\(\hat{\mathbf{y}}=\mathbf{W}(\mathbf{q}-\mathbf{c})/\lVert\mathbf{q}-\mathbf{c}\rVert\)。\(\mathbf{u}\) 并不重构 \(\mathbf{W}\mathbf{r}\)，只作为 \(\hat{\mathbf{z}}\) 的方向代理。用 \(\mathbf{u}\) 分别点乘这两个单位向量再相除，估计这个余弦——量化向量自身的尺度会在比值里消掉：
 
-```text
-<ẑ, ŷ> ≈ <u, ŷ> / <u, ẑ> = ||r|| <W(q-c),u> / (<Wr,u> ||q-c||)
-```
+$$
+\langle\hat{\mathbf{z}},\hat{\mathbf{y}}\rangle
+\approx
+\frac{\langle\mathbf{u},\hat{\mathbf{y}}\rangle}{\langle\mathbf{u},\hat{\mathbf{z}}\rangle}
+=\lVert\mathbf{r}\rVert
+\frac{\langle\mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{u}\rangle}{\langle\mathbf{W}\mathbf{r},\mathbf{u}\rangle\,\lVert\mathbf{q}-\mathbf{c}\rVert}.
+$$
 
 代回交叉项，建索引时保存的残差范数就把幅值校正回来：
 
-```text
-<q-c,r> ≈ ||r||² <W(q-c),u> / <Wr,u>
-```
+$$
+\langle\mathbf{q}-\mathbf{c},\mathbf{r}\rangle
+\approx
+\lVert\mathbf{r}\rVert^{2}
+\frac{\langle\mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{u}\rangle}{\langle\mathbf{W}\mathbf{r},\mathbf{u}\rangle}.
+$$
 
-再按离线（Indexing）和在线（Online）拆开。把 \(\langle W(q-c),u\rangle=\langle Wq,u\rangle-\langle Wc,u\rangle\) 后，与中心有关的一半并进每行的 `add`，热路径只对每条码计算 \(\langle Wq,u\rangle\)：
+再按离线（Indexing）和在线（Online）拆开。把 \(\langle\mathbf{W}(\mathbf{q}-\mathbf{c}),\mathbf{u}\rangle=\langle\mathbf{W}\mathbf{q},\mathbf{u}\rangle-\langle\mathbf{W}\mathbf{c},\mathbf{u}\rangle\) 后，与中心有关的一半并进每行的 `add`，热路径只对每条码计算 \(\langle\mathbf{W}\mathbf{q},\mathbf{u}\rangle\)：
 
-```text
-d²̂(q,o) = ||q-c||²              # 在线 B：当前分区的 query
-         + ( ||r||² + 2||r||² <Wc,u>/<Wr,u> )   # 离线 A：add
-         + (-2||r||² / <Wr,u>) · <Wq,u>         # 离线 C：scale  × 在线交互 D
-```
+$$
+\begin{aligned}
+\hat{d}^{2}(\mathbf{q},\mathbf{o})
+&=
+\underbrace{\lVert\mathbf{q}-\mathbf{c}\rVert^{2}}_{\text{在线 B：query}}
++
+\underbrace{\bigl(\lVert\mathbf{r}\rVert^{2}+2\lVert\mathbf{r}\rVert^{2}\langle\mathbf{W}\mathbf{c},\mathbf{u}\rangle/\langle\mathbf{W}\mathbf{r},\mathbf{u}\rangle\bigr)}_{\text{离线 A：add}}
+\\
+&\quad+
+\underbrace{\bigl(-2\lVert\mathbf{r}\rVert^{2}/\langle\mathbf{W}\mathbf{r},\mathbf{u}\rangle\bigr)}_{\text{离线 C：scale}}
+\cdot
+\underbrace{\langle\mathbf{W}\mathbf{q},\mathbf{u}\rangle}_{\text{在线交互 D}}.
+\end{aligned}
+$$
 
-A、C 和误差因子 E 在建索引时写入每一行；B 和 F 依赖查询与当前 IVF 中心，进入该分区时算一次；D 才是对每个候选做的码内积。`add` 不是单独的 \(\lVert r\rVert^{2}\)。符号码按 \(u_i=b_i-1/2\) 中心化后，D 变成
+A、C 和误差因子 E 在建索引时写入每一行；B 和 F 依赖查询与当前 IVF 中心，进入该分区时算一次；D 才是对每个候选做的码内积。`add` 不是单独的 \(\lVert\mathbf{r}\rVert^{2}\)。符号码按 \(\mathbf{u}_i=b_i-1/2\) 中心化后，D 变成
 
-```text
-<Wq,u> = binary_ip - 0.5 * sum(Wq)
-estimate = add + query + scale * binary_dot
-```
+$$
+\langle\mathbf{W}\mathbf{q},\mathbf{u}\rangle
+=\texttt{binary\_ip}-\tfrac12\sum_{i}(\mathbf{W}\mathbf{q})_{i}.
+$$
 
-`sum(Wq)` 每个查询算一次；`binary_ip` 才是分区扫描里的高频计算。
+在线计算即 `estimate = add + query + scale * binary_dot`。\(\sum_{i}(\mathbf{W}\mathbf{q})_{i}\) 每个查询算一次；`binary_ip` 才是分区扫描里的高频计算。
 
 因此查询阶段无需重构完整浮点残差：读取打包的符号码和少量浮点校正因子，就能得到距离估计。
 
 ## 4. 误差范围如何帮助减少多比特计算
 
-概率界的工程价值不只是告诉我们“估计可能差多少”，还可以把误差半径变成保守下界。数据侧 `error_factor` 离线预计算，查询侧 \(\lVert q-c\rVert\) 在进入分区时计算一次，在线只做乘法：
+概率界的工程价值不只是告诉我们“估计可能差多少”，还可以把误差半径变成保守下界。数据侧 `error_factor` 离线预计算，查询侧 \(\lVert\mathbf{q}-\mathbf{c}\rVert\) 在进入分区时计算一次，在线只做乘法：
 
-```text
-Δ = error_factor * ||q-c||          # 离线 E × 在线 F
-lower_bound = estimate - Δ
-```
+$$
+\Delta(\mathbf{q},\mathbf{o})
+=\texttt{error\_factor}\cdot\lVert\mathbf{q}-\mathbf{c}\rVert,
+\qquad
+\texttt{lower\_bound}
+=\hat{d}^{2}(\mathbf{q},\mathbf{o})-\Delta(\mathbf{q},\mathbf{o}).
+$$
 
 如果这个下界已经不可能进入当前 top-k，候选就可跳过更贵的多比特距离计算。这里仍然是高概率剪枝，而非数学上“永不误剪”的严格下界。Lance v10.0.0 也不会无条件启用它：该门控用于具备 raw-query 估计器和误差因子的多比特 `IVF_RQ` 正常扫描；单比特、快速近似模式或缺少误差因子时会绕过门控。
 
