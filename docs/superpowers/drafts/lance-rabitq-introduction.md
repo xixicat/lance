@@ -64,8 +64,13 @@ lower_bound = estimate - error_factor * ||q-c||
 
 ## 参考资料
 
-- [Lance v10.0.0：RaBitQ 向量存储格式](https://github.com/lancedb/lance/blob/v10.0.0/docs/src/format/index/vector/index.md)
-- [Lance v10.0.0：RaBitQ 构建与量化实现](https://github.com/lancedb/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/builder.rs)
-- [Lance v10.0.0：误差因子与距离校正](https://github.com/lancedb/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/transform.rs)
-- [Lance v10.0.0：查询下界与剪枝路径](https://github.com/lancedb/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/storage.rs)
+- [RaBitQ-Library：Estimator](https://vectordb-ntu.github.io/RaBitQ-Library/rabitq/estimator/)：距离估计、概率误差界和增量估计的推导。
+- [Lance v10.0.0 tag 页面](https://github.com/lance-format/lance/tree/v10.0.0)：本文核对源码的固定版本入口。
+- [`docs/src/format/index/vector/index.md`](https://github.com/lance-format/lance/blob/v10.0.0/docs/src/format/index/vector/index.md)：`IVF_RQ` 的列布局、位数范围和元数据字段。
+- [`rust/lance-index/src/vector/bq/builder.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/builder.rs)：`RabitQuantizer`、`quantize_ex_code`、`best_ex_rescale_factor`，对应符号编码和多比特缩放。
+- [`rust/lance-index/src/vector/bq/rotation.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/rotation.rs)：`FAST_ROTATION_ROUNDS`、`apply_fast_rotation`，对应四轮快速随机旋转。
+- [`rust/lance-index/src/vector/bq/transform.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/transform.rs)：`error_factor_value`、`compute_raw_query_factors`，对应误差因子和距离校正因子。
+- [`rust/lance-index/src/vector/bq/storage.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq/storage.rs)：`raw_query_lower_bound`、`raw_query_lower_bound_gating_disabled_reason`，对应查询下界及其启用条件。
+- [`rust/lance-index/src/vector/bq.rs`](https://github.com/lance-format/lance/blob/v10.0.0/rust/lance-index/src/vector/bq.rs)：`validate_rq_num_bits`、`RABIT_MIN_NUM_BITS`、`RABIT_MAX_NUM_BITS`，对应位数校验。
+- [`python/python/lance/indices/builder.py`](https://github.com/lance-format/lance/blob/v10.0.0/python/python/lance/indices/builder.py)：`IndicesBuilder.train_ivf`，对应 IVF 的 k-means 训练。
 - [RaBitQ 论文](https://arxiv.org/abs/2405.12497)
