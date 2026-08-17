@@ -28,8 +28,8 @@ $$
 z=Wr.
 $$
 
-概念上，正交旋转不改变残差范数，却会打散“能量集中在少数坐标”的坏情形。旋转后，
-只保留每个坐标的符号，构造
+理论推导把 \(W\) 建模为正交旋转：它不改变残差范数，却会打散“能量集中在少数坐标”
+的坏情形。旋转后，只保留每个坐标的符号，构造
 
 $$
 bf_i=
@@ -45,12 +45,15 @@ $$
 
 Lance 提供两种彼此独立的旋转选项：
 
-- `RQRotationType::Fast` 是默认选项。`rotation.rs` 中的
-  `apply_fast_rotation` 固定执行四轮 FHT-Kac 流程。对于 2 的幂维度，每轮依次执行随机
-  符号翻转、FWHT 和缩放；对于非 2 的幂维度，四轮交替处理首尾的 2 的幂窗口，并加入
-  Kac 式成对混合，最后补偿缩放。它不物化稠密矩阵。
-- `RQRotationType::Matrix` 是另一种选项，使用单独的稠密随机正交矩阵路径。它不是
-  Fast 流程中的某一轮，也不应与 FHT-Kac 混为一谈。
+- `RQRotationType::Matrix` 明确构造稠密随机正交矩阵。
+- 默认的 `RQRotationType::Fast` 是与 RaBitQ 参考库对齐的结构化 FHT-Kac 旋转。
+  `rotation.rs` 中的 `apply_fast_rotation` 固定执行四轮：对于 2 的幂维度，每轮依次
+  执行随机符号翻转、FWHT 和归一化；对于非 2 的幂维度，四轮交替归一化首尾的 2 的幂
+  FWHT 子窗口，并执行成对 Hadamard/Kac 混合，最后乘以 \(0.25\) 补偿。IVF_RQ 支持的
+  维度可被 8 整除；在精确算术下，上述符号翻转、归一化子窗口变换、四轮成对混合及最终
+  补偿共同保持整体范数。源码注释保守地称其为 `approximately orthonormal`，因为实际
+  使用 `f32` 运算并有舍入，因而不承诺逐位严格等距；这属于数值实现误差，不是理论模型
+  中的偏差。Fast 不物化稠密矩阵，也不是 Matrix 路径中的某一轮。
 
 这一步换来了一个更适合符号量化的坐标系。接下来真正决定距离估计质量的，是如何使用
 这些符号，而不是如何“还原”原向量。
@@ -194,8 +197,11 @@ $$
 这条 gating 也有明确边界。在 `v10.0.0` 中，它用于满足条件的多比特 `IVF_RQ`
 分区扫描：查询估计器必须是 `RawQuery`，`num_bits > 1`，误差因子列必须存在，而且查询
 的 `ApproxMode` 不能是 `Fast`。这里的查询 `ApproxMode::Fast` 与第一节的
-`RQRotationType::Fast` 是两个不同概念。条件不满足时，代码绕过下界 gating，直接计算
-完整距离。
+`RQRotationType::Fast` 是两个不同概念。禁用下界 gating 只表示不再用二值下界筛掉
+候选，并不自动意味着改算完整多比特距离：`RawQuery` 在 `ApproxMode::Fast` 或
+`num_bits == 1` 时返回 1-bit 的 `raw_query_binary_distance`，`ResidualQuery` 走其兼容
+估计路径；只有适用的多比特 `RawQuery` 路径才继续计算 ex-code 距离，而在 gating 生效
+的 top-k 扫描中则只为下界筛选后的幸存者做这一步。
 
 从公开新建路径看，`VectorIndexParams::ivf_rq` 和
 `VectorIndexParams::with_ivf_rq_params` 创建的是 IVF、Flat 子索引与 Rabit 量化的组合；
