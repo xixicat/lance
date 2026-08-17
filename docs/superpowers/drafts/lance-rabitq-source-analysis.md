@@ -126,7 +126,7 @@ n=\lVert r\rVert^2,\quad
 
 ## 6. 概率误差界如何变成查询下界
 
-1-bit 估计不是精确距离。构建端据旋转残差与符号码的对齐程度生成 `error_factor`。令码维度为 \(d\)，则源码先计算
+1-bit 估计不是精确距离。构建端根据旋转残差与符号码的对齐程度生成 `error_factor`。令码维度为 \(d\)，则源码先计算
 
 \[
 \texttt{alignment}
@@ -146,7 +146,7 @@ n=\lVert r\rVert^2,\quad
 \sqrt n\times 1.9\times\texttt{angular\_error}.
 \]
 
-常量 `RABIT_ERROR_EPSILON` 在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(d\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L117-L137) 是这一计算的唯一实现。
+常量 [`RABIT_ERROR_EPSILON`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L35) 在 `v10.0.0` 中精确为 `1.9`；L2 的 `error_factor` 再乘 2，Dot 保持基础值。若 \(d\le1\)、\(n\le0\) 或 \(\beta=0\)，因子直接为 0。[`error_factor_value`](https://github.com/lance-format/lance/blob/95f2f36b22043c3face00afe088c34e0742d01df/rust/lance-index/src/vector/bq/transform.rs#L117-L137) 是这一计算的唯一实现。
 
 查询侧的 `query_error` 提供另一半尺度：L2 对 `dist_q_c.max(0.0)` 开方；Dot 在有旋转质心时计算 \(\lVert Rq-Rc\rVert\)，没有时对 `dist_q_c.max(0.0)` 开方。最终误差裕量不是两个误差相加，而是明确相乘：
 
@@ -155,7 +155,7 @@ n=\lVert r\rVert^2,\quad
 =\texttt{error\_factor}\times\texttt{query\_error}.
 \]
 
-由此得到用于安全筛选的查询下界：
+由此得到用于剪枝筛选的查询下界：
 
 \[
 \texttt{lower\_bound}
