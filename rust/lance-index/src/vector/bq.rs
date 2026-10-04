@@ -22,6 +22,7 @@ pub(crate) mod dist_table_quant;
 pub mod ex_dot;
 pub(crate) mod pairwise;
 pub mod prune;
+pub mod residual_levels;
 pub mod rotation;
 pub mod storage;
 pub mod transform;
