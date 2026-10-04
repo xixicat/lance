@@ -1226,6 +1226,7 @@ fn inner_create_index<'local>(
         | IndexType::IvfSq
         | IndexType::IvfPq
         | IndexType::IvfRq
+        | IndexType::IvfMrq
         | IndexType::IvfHnswSq
         | IndexType::IvfHnswPq
         | IndexType::IvfHnswFlat => {

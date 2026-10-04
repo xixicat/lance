@@ -29,6 +29,7 @@ use serde::Serialize;
 use lance_index::vector::bq::{RQBuildParams, RQRotationType};
 use lance_index::vector::hnsw::builder::HnswBuildParams;
 use lance_index::vector::ivf::IvfBuildParams;
+use lance_index::vector::mrq::MrqBuildParams;
 use lance_index::vector::pq::PQBuildParams;
 use lance_index::vector::sq::builder::SQBuildParams;
 
@@ -79,6 +80,9 @@ enum CompressionDetailsJson {
     Rq {
         num_bits: u32,
         rotation_type: &'static str,
+    },
+    Mrq {
+        levels: u32,
     },
 }
 
@@ -145,6 +149,9 @@ pub fn vector_index_details(params: &VectorIndexParams) -> prost_types::Any {
             }
             StageParams::RQ(rq) => {
                 compression = Some(Compression::Rq(rq.into()));
+            }
+            StageParams::MRQ(mrq) => {
+                compression = Some(Compression::Mrq(mrq.into()));
             }
         }
     }
@@ -230,6 +237,7 @@ pub fn apply_runtime_hints(hints: &HashMap<String, String>, params: &mut VectorI
                 }
             }
             StageParams::RQ(_) => {}
+            StageParams::MRQ(_) => {}
         }
     }
 }
@@ -296,6 +304,11 @@ pub fn vector_params_from_details(details: &prost_types::Any) -> Option<VectorIn
                 ivf,
                 RQBuildParams::with_rotation_type(rq.num_bits as u8, rotation_type),
             )
+        }
+        (None, Some(Compression::Mrq(mrq))) => {
+            let levels = u8::try_from(mrq.levels).ok()?;
+            let mrq_params = MrqBuildParams::new(levels).ok()?;
+            VectorIndexParams::with_ivf_mrq_params(metric, ivf, mrq_params)
         }
         (Some(hnsw), Some(Compression::Pq(pq))) => VectorIndexParams::with_ivf_hnsw_pq_params(
             metric,
@@ -435,6 +448,7 @@ pub fn derive_vector_index_type(details: &prost_types::Any) -> String {
         Some(Compression::Pq(_)) => index_type.push_str("PQ"),
         Some(Compression::Sq(_)) => index_type.push_str("SQ"),
         Some(Compression::Rq(_)) => index_type.push_str("RQ"),
+        Some(Compression::Mrq(_)) => index_type.push_str("MRQ"),
     }
     index_type
 }
@@ -482,6 +496,7 @@ pub fn vector_details_as_json(details: &prost_types::Any) -> Result<String> {
                 rotation_type,
             })
         }
+        Compression::Mrq(mrq) => Some(CompressionDetailsJson::Mrq { levels: mrq.levels }),
     });
 
     let json = VectorDetailsJson {
@@ -616,6 +631,7 @@ async fn convert_v3_metadata_to_details(
         SupportedIvfIndexType::IvfPq => (false, CompressionKind::Pq),
         SupportedIvfIndexType::IvfSq => (false, CompressionKind::Sq),
         SupportedIvfIndexType::IvfRq => (false, CompressionKind::Rq),
+        SupportedIvfIndexType::IvfMrq => (false, CompressionKind::Mrq),
         SupportedIvfIndexType::IvfHnswFlat => (true, CompressionKind::Flat),
         SupportedIvfIndexType::IvfHnswPq => (true, CompressionKind::Pq),
         SupportedIvfIndexType::IvfHnswSq => (true, CompressionKind::Sq),
@@ -647,7 +663,7 @@ async fn convert_v3_metadata_to_details(
     // the first).
     let compression = match compression_kind {
         CompressionKind::Flat => Some(Compression::Flat(FlatCompression {})),
-        CompressionKind::Pq | CompressionKind::Sq | CompressionKind::Rq => {
+        CompressionKind::Pq | CompressionKind::Sq | CompressionKind::Rq | CompressionKind::Mrq => {
             let aux_file = file_dir.clone().join(INDEX_AUXILIARY_FILE_NAME);
             let aux_reader = open_lance_file(dataset, &aux_file).await?;
             let raw = aux_reader
@@ -692,6 +708,15 @@ async fn convert_v3_metadata_to_details(
                         rotation_type: rotation_type.into(),
                     }))
                 }
+                CompressionKind::Mrq => {
+                    let mrq: lance_index::vector::mrq::MrqQuantizationMetadata =
+                        serde_json::from_str(first)?;
+                    Some(Compression::Mrq(
+                        lance_index::pb::vector_index_details::MultiResidualQuantization {
+                            levels: u32::from(mrq.levels),
+                        },
+                    ))
+                }
                 CompressionKind::Flat => unreachable!(),
             }
         }
@@ -712,6 +737,7 @@ enum CompressionKind {
     Pq,
     Sq,
     Rq,
+    Mrq,
 }
 
 async fn open_lance_file(

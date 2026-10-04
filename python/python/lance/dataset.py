@@ -4040,6 +4040,7 @@ class LanceDataset(pa.dataset.Dataset):
             "IVF_HNSW_PQ",
             "IVF_HNSW_SQ",
             "IVF_RQ",
+            "IVF_MRQ",
         ]
         if index_type not in valid_index_types:
             raise NotImplementedError(
@@ -4505,6 +4506,12 @@ class LanceDataset(pa.dataset.Dataset):
 
             - num_bits
                 The number of bits for RQ (Rabit Quantization). Default is 5.
+
+        Optional parameters for `IVF_MRQ`:
+
+            - levels
+                The number of residual 1-bit levels. Valid range is 1 through 8.
+                Default is 4. `num_bits` is not accepted.
 
         Optional parameters for `IVF_HNSW_*`:
             max_level

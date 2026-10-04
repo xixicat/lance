@@ -55,6 +55,7 @@ use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatQuantize
 use lance_index::vector::graph::OrderedNode;
 use lance_index::vector::hnsw::HNSW;
 use lance_index::vector::ivf::storage::IvfModel;
+use lance_index::vector::mrq::MrqQuantizer;
 use lance_index::vector::pq::ProductQuantizer;
 use lance_index::vector::quantizer::{
     QuantizationType, Quantizer, QuantizerMetadata, QuantizerStorage,
@@ -783,6 +784,15 @@ impl CacheCodecImpl for IvfStateEntryBox {
                 sub_index_type,
                 quantization_type,
             ),
+            QuantizationType::Mrq => make_entry::<MrqQuantizer>(
+                header,
+                ivf,
+                aux_ivf,
+                extra_bytes,
+                distance_type,
+                sub_index_type,
+                quantization_type,
+            ),
         }
     }
 }
@@ -1024,6 +1034,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> CacheKey for IVFPartit
             QuantizationType::Product => 2,
             QuantizationType::Scalar => 3,
             QuantizationType::Rabit => 4,
+            QuantizationType::Mrq => 5,
         });
         builder.write_u64(self.partition_id as u64);
     }
@@ -2095,6 +2106,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> Index for IVFIndex<S, 
             (SubIndexType::Flat, QuantizationType::Product) => IndexType::IvfPq,
             (SubIndexType::Flat, QuantizationType::Scalar) => IndexType::IvfSq,
             (SubIndexType::Flat, QuantizationType::Rabit) => IndexType::IvfRq,
+            (SubIndexType::Flat, QuantizationType::Mrq) => IndexType::IvfMrq,
             (SubIndexType::Hnsw, QuantizationType::Product) => IndexType::IvfHnswPq,
             (SubIndexType::Hnsw, QuantizationType::Scalar) => IndexType::IvfHnswSq,
             (SubIndexType::Hnsw, QuantizationType::Flat)

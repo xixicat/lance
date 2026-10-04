@@ -17,6 +17,7 @@ use crate::vector::bq::builder::RabitQuantizer;
 use crate::vector::bq::transform::RQTransformer;
 use crate::vector::ivf::transform::PartitionTransformer;
 use crate::vector::kmeans::{compute_partitions_arrow_array, kmeans_find_partitions_arrow_array};
+use crate::vector::mrq::MrqTransformer;
 use crate::vector::{pq::ProductQuantizer, transform::Transformer};
 
 use super::flat::transform::FlatTransformer;
@@ -82,6 +83,13 @@ pub fn new_ivf_transformer_with_quantizer(
         Quantizer::Rabit(rq) => {
             IvfTransformer::with_rq(centroids, metric_type, vector_column, rq, range)
         }
+        Quantizer::Mrq(mq) => Ok(IvfTransformer::with_mrq(
+            centroids,
+            metric_type,
+            vector_column,
+            mq,
+            range,
+        )),
     }
 }
 
@@ -321,6 +329,49 @@ impl IvfTransformer {
         )?));
 
         Ok(Self::new(centroids, distance_type, transforms))
+    }
+
+    fn with_mrq(
+        centroids: FixedSizeListArray,
+        distance_type: DistanceType,
+        vector_column: &str,
+        mq: crate::vector::mrq::MrqQuantizer,
+        range: Option<Range<u32>>,
+    ) -> Self {
+        let mut transforms: Vec<Arc<dyn Transformer>> =
+            vec![Arc::new(super::transform::Flatten::new(vector_column))];
+
+        let distance_type = if distance_type == MetricType::Cosine {
+            transforms.push(Arc::new(super::transform::NormalizeTransformer::new(
+                vector_column,
+            )));
+            MetricType::L2
+        } else {
+            distance_type
+        };
+        transforms.push(Arc::new(KeepFiniteVectors::new(vector_column)));
+
+        let partition_transform = Arc::new(
+            PartitionTransformer::new(centroids.clone(), distance_type, vector_column)
+                .with_distance(true),
+        );
+        transforms.push(partition_transform);
+
+        if let Some(range) = range {
+            transforms.push(Arc::new(transform::PartitionFilter::new(
+                PART_ID_COLUMN,
+                range,
+            )));
+        }
+
+        transforms.push(Arc::new(ResidualTransform::new(
+            centroids.clone(),
+            PART_ID_COLUMN,
+            vector_column,
+        )));
+        transforms.push(Arc::new(MrqTransformer::new(mq, vector_column)));
+
+        Self::new(centroids, distance_type, transforms)
     }
 
     #[inline]

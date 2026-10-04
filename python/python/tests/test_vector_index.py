@@ -1346,6 +1346,46 @@ def test_create_ivf_sq_index(dataset, tmp_path):
     assert ann_ds.describe_indices()[0].field_names == ["vector"]
 
 
+@pytest.mark.parametrize("budget", [1, 4, 8])
+def test_ivf_mrq_matches_ivf_rq_recall(tmp_path, budget):
+    dim = 32
+    rows = 256
+    k = 10
+    uri = tmp_path / "mrq.lance"
+    data = np.random.default_rng(0).standard_normal((rows, dim)).astype(np.float32)
+    table = pa.table(
+        {
+            "id": pa.array(np.arange(rows)),
+            "vector": pa.FixedSizeListArray.from_arrays(data.reshape(-1), dim),
+        }
+    )
+    dataset = lance.write_dataset(table, uri)
+    queries = data[:8]
+
+    def recall(index_type, **params):
+        dataset.create_index(
+            "vector", index_type, num_partitions=4, replace=True, metric="L2", **params
+        )
+        hits = 0
+        for row in range(len(queries)):
+            exact = np.argsort(np.linalg.norm(data - queries[row], axis=1))[:k]
+            found = (
+                dataset.to_table(
+                    nearest={"column": "vector", "q": queries[row], "k": k}
+                )
+                .column("id")
+                .to_pylist()
+            )
+            hits += len(set(exact.tolist()) & set(found))
+        return hits / (len(queries) * k)
+
+    rq_recall = recall("IVF_RQ", num_bits=budget)
+    mrq_recall = recall("IVF_MRQ", levels=budget)
+    assert rq_recall >= 0.5, rq_recall
+    assert mrq_recall >= 0.5, mrq_recall
+    assert mrq_recall + 0.05 >= rq_recall, (mrq_recall, rq_recall, budget)
+
+
 def test_create_ivf_rq_index():
     ds = lance.write_dataset(create_table(), "memory://")
     ds = ds.create_index(

@@ -50,6 +50,7 @@ pub fn partition_entry_codec<S: IvfSubIndex + 'static, Q: Quantization + 'static
         QuantizationType::FlatBin => Some(codec_for::<S, Q, FlatBinQuantizer>()),
         QuantizationType::Scalar => Some(codec_for::<S, Q, ScalarQuantizer>()),
         QuantizationType::Rabit => Some(codec_for::<S, Q, RabitQuantizer>()),
+        QuantizationType::Mrq => None,
     }
 }
 

@@ -20,6 +20,7 @@ use futures::{StreamExt, TryFutureExt};
 use lance_index::scalar::minhash_lsh::MinHashQuery;
 use lance_index::vector::bq::RQBuildParams;
 use lance_index::vector::bq::storage::RabitQuantizationMetadata;
+use lance_index::vector::mrq::MrqBuildParams;
 use log::error;
 use object_store::path::Path;
 use pyo3::exceptions::{PyStopIteration, PyTypeError};
@@ -2638,8 +2639,8 @@ impl Dataset {
             "RTREE" => IndexType::RTree,
             "INVERTED" | "FTS" => IndexType::Inverted,
             "FM" => IndexType::Fm,
-            "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
-            | "IVF_HNSW_SQ" => IndexType::Vector,
+            "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ" | "IVF_MRQ" | "IVF_HNSW_FLAT"
+            | "IVF_HNSW_PQ" | "IVF_HNSW_SQ" => IndexType::Vector,
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "Index type '{index_type}' is not supported."
@@ -5326,6 +5327,29 @@ fn prepare_vector_index_params(
         "IVF_RQ" => Ok(Box::new(VectorIndexParams::with_ivf_rq_params(
             m_type, ivf_params, rq_params,
         ))),
+
+        "IVF_MRQ" => {
+            let mut levels: u8 = 4;
+            if let Some(kwargs) = kwargs
+                && let Some(value) = kwargs.get_item("levels")?
+            {
+                levels = value.extract()?;
+            }
+            if kwargs
+                .and_then(|kwargs| kwargs.get_item("num_bits").ok())
+                .flatten()
+                .is_some()
+            {
+                return Err(PyValueError::new_err(
+                    "IVF_MRQ uses `levels` (1..=8), not `num_bits`",
+                ));
+            }
+            let mrq_params = MrqBuildParams::new(levels)
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            Ok(Box::new(VectorIndexParams::with_ivf_mrq_params(
+                m_type, ivf_params, mrq_params,
+            )))
+        }
 
         "IVF_HNSW_FLAT" => Ok(Box::new(VectorIndexParams::ivf_hnsw(
             m_type,

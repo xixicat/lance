@@ -31,6 +31,7 @@ pub mod graph;
 pub mod hnsw;
 pub mod ivf;
 pub mod kmeans;
+pub mod mrq;
 pub mod pairwise;
 pub mod pq;
 pub mod quantizer;

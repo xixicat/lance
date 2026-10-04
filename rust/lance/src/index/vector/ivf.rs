@@ -77,6 +77,7 @@ use lance_index::vector::hnsw::builder::HNSW_METADATA_KEY;
 use lance_index::vector::ivf::storage::IVF_METADATA_KEY;
 use lance_index::vector::ivf::storage::IvfModel;
 use lance_index::vector::kmeans::{KMeans, KMeansParams};
+use lance_index::vector::mrq::MrqQuantizer;
 use lance_index::vector::pq::storage::{
     PQ_METADATA_KEY, ProductQuantizationMetadata, ProductQuantizationStorage, transpose,
 };
@@ -496,6 +497,7 @@ fn vector_index_dimension(index: &dyn VectorIndex) -> usize {
         Quantizer::Product(quantizer) => quantizer.dimension,
         Quantizer::Scalar(quantizer) => quantizer.metadata(None).dim,
         Quantizer::Rabit(quantizer) => quantizer.metadata(None).rotated_dim(),
+        Quantizer::Mrq(quantizer) => quantizer.dim(),
     }
 }
 
@@ -638,6 +640,11 @@ fn shared_quantizer_model(left: &Quantizer, right: &Quantizer) -> bool {
                     (None, None) => true,
                     _ => false,
                 }
+        }
+        (Quantizer::Mrq(left), Quantizer::Mrq(right)) => {
+            let left = left.metadata_ref();
+            let right = right.metadata_ref();
+            left.dim == right.dim && left.levels == right.levels && left.signs == right.signs
         }
         _ => false,
     }
@@ -910,6 +917,26 @@ pub(crate) async fn optimize_vector_indices_v2(
         }
         (SubIndexType::Flat, QuantizationType::Rabit) => {
             IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        (SubIndexType::Flat, QuantizationType::Mrq) => {
+            IvfIndexBuilder::<FlatIndex, MrqQuantizer>::new_incremental(
                 dataset.clone(),
                 vector_column.to_owned(),
                 index_dir,
@@ -2123,6 +2150,13 @@ pub(crate) async fn remap_index_file_v3(
             .remap(mapping)
             .await
         }
+        (SubIndexType::Flat, QuantizationType::Mrq) => {
+            IvfIndexBuilder::<FlatIndex, MrqQuantizer>::new_remapper(
+                dataset, column, index_dir, index,
+            )?
+            .remap(mapping)
+            .await
+        }
         (SubIndexType::Hnsw, QuantizationType::Flat) => {
             IvfIndexBuilder::<HNSW, FlatQuantizer>::new_remapper(dataset, column, index_dir, index)?
                 .remap(mapping)
@@ -2157,6 +2191,9 @@ pub(crate) async fn remap_index_file_v3(
             .remap(mapping)
             .await
         }
+        (SubIndexType::Hnsw, QuantizationType::Mrq) => Err(Error::index(
+            "MRQ quantization is not supported for HNSW index".to_string(),
+        )),
     }
 }
 
@@ -2808,7 +2845,7 @@ async fn write_root_vector_index_from_auxiliary(
     let is_hnsw = idx_meta.index_type.starts_with("IVF_HNSW");
     let is_flat_based = matches!(
         idx_meta.index_type.as_str(),
-        "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ"
+        "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ" | "IVF_MRQ"
     );
 
     if is_hnsw {

@@ -41,6 +41,7 @@ use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatQuantize
 use lance_index::vector::hnsw::HNSW;
 use lance_index::vector::ivf::builder::recommended_num_partitions;
 use lance_index::vector::ivf::storage::IvfModel;
+use lance_index::vector::mrq::{MrqBuildParams, MrqQuantizer};
 use object_store::path::Path;
 
 use lance_arrow::FixedSizeListArrayExt;
@@ -237,6 +238,8 @@ pub enum StageParams {
     PQ(PQBuildParams),
     SQ(SQBuildParams),
     RQ(RQBuildParams),
+    /// Multi-level residual 1-bit quantization (`IVF_MRQ`).
+    MRQ(MrqBuildParams),
 }
 
 // The version of the index file.
@@ -377,6 +380,16 @@ impl VectorIndexParams {
         }
     }
 
+    /// Create an `IVF_MRQ` index.
+    ///
+    /// `levels` is the number of residual 1-bit stages and must be in `1..=8`.
+    /// Invalid levels panic; [`MrqBuildParams::new`] returns the same range as an error.
+    pub fn ivf_mrq(num_partitions: usize, levels: u8, distance_type: DistanceType) -> Self {
+        let ivf = IvfBuildParams::new(num_partitions);
+        let mrq = MrqBuildParams::new(levels).expect("IVF_MRQ levels must be in 1..=8");
+        Self::with_ivf_mrq_params(distance_type, ivf, mrq)
+    }
+
     /// Create index parameters with `IVF` and `PQ` parameters, respectively.
     pub fn with_ivf_pq_params(
         metric_type: MetricType,
@@ -414,6 +427,21 @@ impl VectorIndexParams {
         rq: RQBuildParams,
     ) -> Self {
         let stages = vec![StageParams::Ivf(ivf), StageParams::RQ(rq)];
+        Self {
+            stages,
+            metric_type,
+            version: IndexFileVersion::V3,
+            skip_transpose: false,
+            runtime_hints: HashMap::new(),
+        }
+    }
+
+    pub fn with_ivf_mrq_params(
+        metric_type: MetricType,
+        ivf: IvfBuildParams,
+        mrq: MrqBuildParams,
+    ) -> Self {
+        let stages = vec![StageParams::Ivf(ivf), StageParams::MRQ(mrq)];
         Self {
             stages,
             metric_type,
@@ -490,6 +518,7 @@ impl VectorIndexParams {
             (2, _, Some(StageParams::PQ(_))) => IndexType::IvfPq,
             (2, _, Some(StageParams::SQ(_))) => IndexType::IvfSq,
             (2, _, Some(StageParams::RQ(_))) => IndexType::IvfRq,
+            (2, _, Some(StageParams::MRQ(_))) => IndexType::IvfMrq,
             (2, _, Some(StageParams::Hnsw(_))) => IndexType::IvfHnswFlat,
             (3, Some(StageParams::Hnsw(_)), Some(StageParams::PQ(_))) => IndexType::IvfHnswPq,
             (3, Some(StageParams::Hnsw(_)), Some(StageParams::SQ(_))) => IndexType::IvfHnswSq,
@@ -1139,6 +1168,35 @@ pub(crate) async fn build_distributed_vector_index(
             return Ok((segment_uuid, summary.files));
         }
 
+        IndexType::IvfMrq => {
+            let StageParams::MRQ(mrq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let ivf_model = make_ivf_model();
+
+            let summary = IvfIndexBuilder::<FlatIndex, MrqQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(mrq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?
+            .with_ivf(ivf_model)
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
         _ => {
             return Err(Error::index(format!(
                 "Build Distributed Vector Index: invalid index type: {:?}",
@@ -1368,6 +1426,31 @@ async fn build_vector_index_impl(
                 .with_progress(progress.clone())
                 .build()
                 .await?;
+            Ok(summary.files)
+        }
+        IndexType::IvfMrq => {
+            let StageParams::MRQ(mrq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let summary = IvfIndexBuilder::<FlatIndex, MrqQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(mrq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?
+            .with_optional_fragment_filter(fragment_ids)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
             Ok(summary.files)
         }
         IndexType::IvfHnswFlat => {
@@ -1650,6 +1733,25 @@ pub(crate) async fn build_vector_index_incremental(
                 .await?;
             return Ok(summary);
         }
+        // IVF_MRQ
+        (SubIndexType::Flat, QuantizationType::Mrq) => {
+            let summary = IvfIndexBuilder::<FlatIndex, MrqQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?
+            .with_ivf(ivf_model)
+            .with_quantizer(quantizer.try_into()?)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok(summary);
+        }
         // IVF_HNSW variants
         (SubIndexType::Hnsw, quantization_type) => {
             let StageParams::Hnsw(hnsw_params) = &stages[1] else {
@@ -1735,6 +1837,11 @@ pub(crate) async fn build_vector_index_incremental(
                 QuantizationType::Rabit => {
                     return Err(Error::index(
                         "Rabit quantization is not supported for HNSW index".to_string(),
+                    ));
+                }
+                QuantizationType::Mrq => {
+                    return Err(Error::index(
+                        "MRQ quantization is not supported for HNSW index".to_string(),
                     ));
                 }
             }
@@ -2075,6 +2182,11 @@ pub async fn initialize_vector_index(
             let rabit_params = derive_rabit_params(&rabit_quantizer);
             VectorIndexParams::with_ivf_rq_params(metric_type, ivf_params, rabit_params)
         }
+        (SubIndexType::Flat, QuantizationType::Mrq) => {
+            let mrq_quantizer: MrqQuantizer = quantizer.try_into()?;
+            let mrq_params = derive_mrq_params(&mrq_quantizer);
+            VectorIndexParams::with_ivf_mrq_params(metric_type, ivf_params, mrq_params)
+        }
         (SubIndexType::Hnsw, quantization_type) => {
             let hnsw_params = derive_hnsw_params(source_vector_index.as_ref());
             match quantization_type {
@@ -2104,6 +2216,11 @@ pub async fn initialize_vector_index(
                 QuantizationType::Rabit => {
                     return Err(Error::index(
                         "Rabit quantization is not supported for HNSW index".to_string(),
+                    ));
+                }
+                QuantizationType::Mrq => {
+                    return Err(Error::index(
+                        "MRQ quantization is not supported for HNSW index".to_string(),
                     ));
                 }
             }
@@ -2219,6 +2336,15 @@ fn derive_rabit_params(rabit_quantizer: &RabitQuantizer) -> RQBuildParams {
     }
 }
 
+fn derive_mrq_params(quantizer: &MrqQuantizer) -> MrqBuildParams {
+    MrqBuildParams {
+        levels: quantizer.levels(),
+        // A fresh segment draws its own Fast rotation. Incremental builds reuse
+        // the quantizer that was already trained.
+        signs: None,
+    }
+}
+
 /// Extract HNSW build parameters from the source vector index statistics.
 /// Returns default parameters if extraction fails.
 /// TODO: support consistently deriving all the original parameters
@@ -2279,12 +2405,14 @@ fn vector_index_type(index: &dyn VectorIndex) -> IndexType {
         (SubIndexType::Flat, QuantizationType::Product) => IndexType::IvfPq,
         (SubIndexType::Flat, QuantizationType::Scalar) => IndexType::IvfSq,
         (SubIndexType::Flat, QuantizationType::Rabit) => IndexType::IvfRq,
+        (SubIndexType::Flat, QuantizationType::Mrq) => IndexType::IvfMrq,
         (SubIndexType::Hnsw, QuantizationType::Flat | QuantizationType::FlatBin) => {
             IndexType::IvfHnswFlat
         }
         (SubIndexType::Hnsw, QuantizationType::Product) => IndexType::IvfHnswPq,
         (SubIndexType::Hnsw, QuantizationType::Scalar) => IndexType::IvfHnswSq,
         (SubIndexType::Hnsw, QuantizationType::Rabit) => IndexType::Vector,
+        (SubIndexType::Hnsw, QuantizationType::Mrq) => IndexType::Vector,
     }
 }
 
@@ -2341,6 +2469,14 @@ pub(crate) fn fresh_vector_segment_params(
                 derive_rabit_params(&quantizer),
             )
         }
+        (SubIndexType::Flat, QuantizationType::Mrq) => {
+            let quantizer: MrqQuantizer = quantizer.try_into()?;
+            VectorIndexParams::with_ivf_mrq_params(
+                metric_type,
+                ivf_params,
+                derive_mrq_params(&quantizer),
+            )
+        }
         (SubIndexType::Hnsw, QuantizationType::Flat | QuantizationType::FlatBin) => {
             VectorIndexParams::ivf_hnsw(metric_type, ivf_params, derive_hnsw_params(index))
         }
@@ -2370,6 +2506,12 @@ pub(crate) fn fresh_vector_segment_params(
                     .to_string(),
             ));
         }
+        (SubIndexType::Hnsw, QuantizationType::Mrq) => {
+            return Err(Error::index(
+                "Cannot build a fresh IVF_HNSW_MRQ segment: this index type is unsupported"
+                    .to_string(),
+            ));
+        }
     })
 }
 
@@ -2387,6 +2529,22 @@ mod tests {
     use lance_file::writer::FileWriterOptions;
     use lance_index::metrics::NoOpMetricsCollector;
     use lance_linalg::distance::MetricType;
+
+    #[test]
+    fn ivf_mrq_params_report_mrq_index_type() {
+        let params = VectorIndexParams::ivf_mrq(16, 8, DistanceType::L2);
+        assert_eq!(params.index_type(), IndexType::IvfMrq);
+        match params.stages.last() {
+            Some(StageParams::MRQ(mrq)) => assert_eq!(mrq.levels, 8),
+            other => panic!("expected MRQ stage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ivf_mrq_rejects_nine_levels() {
+        let error = MrqBuildParams::new(9).unwrap_err();
+        assert!(error.to_string().contains("1..=8"));
+    }
 
     /// A build that was handed its codebook has nothing to fit, so the rows
     /// that fitting would have needed are not required of it.
