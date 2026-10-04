@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land a self-contained Rust spike that encodes vectors with one Fast rotation and 1–4 greedy residual 1-bit levels, scores them with the reconstruction inner product, prunes with the bias-corrected probabilistic bound, and prints a recall / prune table that decides whether IVF integration is worth doing.
+**Goal:** Add an `IVF_MRQ` index that quantizes IVF residuals with one Fast rotation and 1–8 greedy 1-bit residual levels, and compare its recall with `IVF_RQ` at the same level / `num_bits` budget.
 
-**Architecture:** All new behavior lives in `lance-index` as a pure function module. It rotates once with the existing Fast Hadamard path, keeps every residual in that rotated space, and never calls `RabitQuantizer` or the IVF writer. A library search function is covered by unit tests. An example binary is the puncture run: fixed seed, two datasets, several `γ`, process exit code is the gate.
+**Architecture:** The math lives in `lance-index` as `residual_levels.rs` and does not change `RabitQuantizer`. `IVF_MRQ` is a new `IndexType` (`IvfMrq = 108`) and a new quantizer, wired through the same IVF builder as `IVF_RQ`. `IVF_RQ` files stay readable and writable exactly as they are today. A fixed-seed example prints the algorithm table. A dataset test builds both indexes on the same rows and records recall.
 
 **Tech Stack:** Rust, `lance-index` crate, existing `vector/bq/rotation.rs`, `rand` 0.9, `rand_distr`.
 
@@ -12,14 +12,18 @@
 
 - One shared Fast rotation per encoder. Do not rotate again at each level.
 - Residual update is `e_k = e_{k-1} - α_k * sign(e_{k-1})` with `α_k = ||e_{k-1}||_1 / d` and `sign(0) = +1`.
-- Level count is `1..=4`. `1` is the baseline inside this encoder, not IVF_RQ `num_bits`.
+- Level count is `1..=8`. `1` is the baseline inside this encoder. It is not IVF_RQ `num_bits`.
 - Distance is squared L2 in the rotated space: `N_sq + ||q_r||^2 - 2 S`.
 - Joint least squares is on by default for the spike binary. A singular `BᵀB` keeps the greedy coefficients.
 - Store per level: packed `±1` code, `alpha`, `radius = ||e_k||_2`, `bias = <e_k, o_r>`.
 - Candidate cap: `U_k = min(R_k L_q, b_k + γ R_k L_q / sqrt(d))`.
 - Heap cut: `D_cut^2 = D_est^2(A) + 2 γ R_m(A) L_q / sqrt(d)`, using A's own final radius.
 - `γ = sqrt(d)` is the Cauchy safe setting. `γ = 3` is an aggressive setting, not a 99.7% recall guarantee.
-- Do not change IVF_RQ auxiliary files, protobuf, Python, or Java in this plan.
+- `IVF_MRQ` is a new index. Do not reuse `num_bits`, `__blocked_ex_codes`, or `RabitQuantizer` storage for it.
+- `IVF_RQ` behavior stays unchanged. Match arms grow a new variant; they do not change existing `Rabit` arms.
+- `IndexType::IvfMrq` discriminant is `108`. Its format version is `3`. `IvfRq` stays version `2`.
+- Python parameter is `levels`, default `4`. Passing `num_bits` to `IVF_MRQ` is an error.
+- Comparison budget is `IVF_MRQ levels = m` against `IVF_RQ num_bits = m` for `m ∈ {1, 4, 8}`. Both must reach recall@10 `>= 0.5`. `IVF_MRQ` must not fall more than `0.05` below `IVF_RQ` at the same `m`.
 - Code comments and names are English. Tests assert; the example binary is the only place that prints the table.
 - Power-of-two dimensions in tests (`8`, `32`, `128`). The example may also run `768`.
 
@@ -28,20 +32,16 @@
 ## File structure
 
 - Create `rust/lance-index/src/vector/bq/residual_levels.rs`. Encoding, joint refit, rotated L2 estimate, lower bound, partition search.
+- Create `rust/lance-index/src/vector/mrq/mod.rs`. `MrqQuantizer`, metadata, and storage. This is the IVF quantizer. It calls `residual_levels`, not `RabitQuantizer`.
 - Modify `rust/lance-index/src/vector/bq.rs`. Add `pub mod residual_levels;`.
-- Create `rust/lance-index/examples/residual_levels_spike.rs`. Fixed-seed puncture table and exit-code gate.
-- Do not modify `storage.rs`, `transform.rs`, `builder.rs`, or `benches/rq.rs`.
-
-## Out of scope until the spike gate passes
-
-IVF wiring is a separate plan. Start it only after `cargo run -p lance-index --example residual_levels_spike --release` exits 0 and the printed `m=4` gaussian recall is recorded in the PR. The follow-up touches:
-
-- `RQTransformer` in `rust/lance-index/src/vector/bq/transform.rs`, after the existing `ResidualTransform` in `IvfTransformer`.
-- A new metadata field on `RabitQuantizationMetadata`. Do not reuse `num_bits` (that field already means ex-bits).
-- New auxiliary columns `__mrq_codes`, `__mrq_alpha`, `__mrq_radius`, `__mrq_bias` beside the existing `_rabit_codes`.
-- A level-batched mask in `RabitDistCalculator`, matching `accumulate_raw_query_multi_bit_topk_with_scratch`: scan a whole level, then drop rows, then scan the next level.
-- `γ` is a search parameter. `R_k` and `b_k` are build-time columns.
-- `m = 1` indexes stay on today's IVF_RQ reader path.
+- Modify `rust/lance-index/src/vector/quantizer.rs`. Add `QuantizationType::Mrq` and `Quantizer::Mrq`.
+- Modify `rust/lance-index-core/src/lib.rs`. Add `IndexType::IvfMrq = 108`.
+- Modify `protos/index.proto`. Add `MultiResidualQuantization` as a new `compression` arm.
+- Modify `rust/lance/src/index/vector.rs`. Add `StageParams::MRQ` and `VectorIndexParams::ivf_mrq`.
+- Modify `python/src/dataset.rs`. Accept `index_type="IVF_MRQ"` and kwargs `levels`.
+- Create `rust/lance-index/examples/residual_levels_spike.rs`. Algorithm table only.
+- Modify `python/python/tests/test_vector_index.py`. Recall comparison against `IVF_RQ`.
+- Do not modify `RabitQuantizer` math, `num_bits` validation, or the IVF_RQ auxiliary column set.
 
 ---
 
@@ -111,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_level_count_outside_1_to_4() {
+    fn rejects_level_count_outside_1_to_8() {
         let error = encode_rotated(&sample(), 0, false).unwrap_err();
         assert!(error.to_string().contains("levels"));
-        let error = encode_rotated(&sample(), 5, false).unwrap_err();
+        let error = encode_rotated(&sample(), 9, false).unwrap_err();
         assert!(error.to_string().contains("levels"));
     }
 }
@@ -122,7 +122,7 @@ mod tests {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p lance-index greedy_residual_is_orthogonal_to_its_sign --lib`
+Run: `cargo test -p lance-index rejects_level_count_outside_1_to_8 --lib`
 
 Expected: FAIL because `encode_rotated` is not defined.
 
@@ -240,9 +240,9 @@ pub fn encode_rotated(rotated: &[f32], levels: usize, joint: bool) -> Result<Enc
 }
 
 fn validate_levels(levels: usize) -> Result<()> {
-    if !(1..=4).contains(&levels) {
+    if !(1..=8).contains(&levels) {
         return Err(Error::invalid_input(format!(
-            "residual levels must be in 1..=4, got {levels}"
+            "residual levels must be in 1..=8, got {levels}"
         )));
     }
     Ok(())
@@ -299,7 +299,7 @@ Keep the `mod tests` block from Step 1 at the bottom of the same file.
 
 Run: `cargo test -p lance-index residual_levels --lib`
 
-Expected: `greedy_residual_is_orthogonal_to_its_sign`, `zero_vector_has_zero_coefficients`, and `rejects_level_count_outside_1_to_4` PASS.
+Expected: `greedy_residual_is_orthogonal_to_its_sign`, `zero_vector_has_zero_coefficients`, and `rejects_level_count_outside_1_to_8` PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -388,7 +388,7 @@ fn solve_codes(rotated: &[f32], pm1: &[Vec<i8>]) -> Option<Vec<f32>> {
 
 pub(crate) fn solve_gram(gram: &[Vec<f64>], proj: &[f64]) -> Option<Vec<f64>> {
     let n = proj.len();
-    if gram.len() != n || gram.iter().any(|row| row.len() != n) || n == 0 || n > 4 {
+    if gram.len() != n || gram.iter().any(|row| row.len() != n) || n == 0 || n > 8 {
         return None;
     }
     let mut a = gram.to_vec();
@@ -429,7 +429,7 @@ pub(crate) fn solve_gram(gram: &[Vec<f64>], proj: &[f64]) -> Option<Vec<f64>> {
 
 Run: `cargo test -p lance-index residual_levels --lib`
 
-Expected: PASS, including `joint_refit_does_not_increase_final_residual` and `singular_gram_returns_none`.
+Expected: PASS, including `joint_refit_does_not_increase_final_residual` and `singular_gram_returns_none`. Also run `encode_rotated(&sample(), 8, true)` from an extra assertion in `joint_refit_does_not_increase_final_residual`: the 8-level joint radius is `<=` the 8-level greedy radius plus `1e-3`. The gram solver must accept `n = 8`.
 
 - [ ] **Step 5: Commit**
 
@@ -806,8 +806,8 @@ git commit -m "test(index): gate residual-level recall on gaussian rows"
 Gates, evaluated on the run, not by editing constants after seeing a bad result:
 
 - Copied-row query: `lower_bound_sq` of that row against itself is `<= 1e-2` at every level for `γ ∈ {3, sqrt(d)}`.
-- Gaussian `dim=128`, `rows=400`, `queries=40`, `k=10`, `m=4`, joint refit, pruning off: mean recall@10 `>= 0.5`.
-- Same data, `m=4` recall `+ 0.02 >= m=1` recall.
+- Gaussian `dim=128`, `rows=400`, `queries=40`, `k=10`, `m=8`, joint refit, pruning off: mean recall@10 `>= 0.5`.
+- Same data, `m=8` recall `+ 0.02 >= m=1` recall.
 - Same data, prune ratio at `γ = sqrt(d)` is `<=` prune ratio at `γ = 3`.
 
 - [ ] **Step 1: Write the example**
@@ -940,10 +940,10 @@ fn main() -> ExitCode {
         let encoder = ResidualEncoder::new(dim);
         let gamma_safe = (dim as f32).sqrt();
         let mut recall_m1 = 0.0f32;
-        let mut recall_m4 = 0.0f32;
+        let mut recall_m8 = 0.0f32;
         let mut prune_safe = 0.0f32;
         let mut prune_aggressive = 0.0f32;
-        for levels in [1usize, 2, 3, 4] {
+        for levels in [1usize, 2, 4, 8] {
             let (recall, _) = recall_for(&encoder, &data.rows, &queries, levels, 10, gamma_safe, false);
             println!(
                 "gaussian\t{dim}\t{rows}\t{queries_n}\t{levels}\t{gamma_safe:.4}\toff\t{recall:.4}\t0"
@@ -951,15 +951,15 @@ fn main() -> ExitCode {
             if levels == 1 {
                 recall_m1 = recall;
             }
-            if levels == 4 {
-                recall_m4 = recall;
+            if levels == 8 {
+                recall_m8 = recall;
             }
         }
         for (label, gamma) in [("aggressive", 3.0f32), ("safe", gamma_safe)] {
             let (recall, prune_ratio) =
-                recall_for(&encoder, &data.rows, &queries, 4, 10, gamma, true);
+                recall_for(&encoder, &data.rows, &queries, 8, 10, gamma, true);
             println!(
-                "gaussian\t{dim}\t{rows}\t{queries_n}\t4\t{gamma:.4}\t{label}\t{recall:.4}\t{prune_ratio:.4}"
+                "gaussian\t{dim}\t{rows}\t{queries_n}\t8\t{gamma:.4}\t{label}\t{recall:.4}\t{prune_ratio:.4}"
             );
             if label == "safe" {
                 prune_safe = prune_ratio;
@@ -967,12 +967,12 @@ fn main() -> ExitCode {
                 prune_aggressive = prune_ratio;
             }
         }
-        if dim == 128 && recall_m4 < 0.5 {
-            eprintln!("gate failed: dim 128 m=4 recall {recall_m4} < 0.5");
+        if dim == 128 && recall_m8 < 0.5 {
+            eprintln!("gate failed: dim 128 m=8 recall {recall_m8} < 0.5");
             failed = true;
         }
-        if dim == 128 && recall_m4 + 0.02 < recall_m1 {
-            eprintln!("gate failed: m=4 recall {recall_m4} regressed past m=1 recall {recall_m1}");
+        if dim == 128 && recall_m8 + 0.02 < recall_m1 {
+            eprintln!("gate failed: m=8 recall {recall_m8} regressed past m=1 recall {recall_m1}");
             failed = true;
         }
         if dim == 128 && prune_safe > prune_aggressive + 1.0e-6 {
@@ -983,9 +983,9 @@ fn main() -> ExitCode {
         }
 
         let clustered = clustered(dim, rows, &mut rng);
-        let (recall, _) = recall_for(&encoder, &clustered.rows, &queries, 4, 10, gamma_safe, false);
+        let (recall, _) = recall_for(&encoder, &clustered.rows, &queries, 8, 10, gamma_safe, false);
         println!(
-            "clustered\t{dim}\t{rows}\t{queries_n}\t4\t{gamma_safe:.4}\toff\t{recall:.4}\t0"
+            "clustered\t{dim}\t{rows}\t{queries_n}\t8\t{gamma_safe:.4}\toff\t{recall:.4}\t0"
         );
     }
 
@@ -1003,13 +1003,13 @@ Expected: PASS. The example is not part of `--lib`.
 
 Run: `cargo run -p lance-index --example residual_levels_spike --release`
 
-Expected: a TSV header `dataset dim rows queries m gamma prune recall_at_10 prune_ratio`, then rows for gaussian `m=1..4` and both prune settings at dim `128` and `768`, plus clustered `m=4`. Exit code `0` if the dim-128 gates hold. Exit code `1` rejects IVF integration.
+Expected: a TSV header `dataset dim rows queries m gamma prune recall_at_10 prune_ratio`, then rows for gaussian `m ∈ {1, 2, 4, 8}` and both prune settings at dim `128` and `768`, plus clustered `m=8`. Exit code `0` if the dim-128 gates hold. Exit code `1` stops the index work.
 
 Interpret the table this way:
 
-- `m=4` recall at or below `m=1` means extra residual levels are not buying neighbors. Stop.
-- `prune_ratio` at `γ=3` near `0` means the bound is still too loose to pay for a scan-path change. Stop even if recall is high.
-- `prune_ratio` at `γ=3` high while its `recall_at_10` falls well below the unpruned `m=4` row means the aggressive bound is deleting true neighbors. Keep `γ = sqrt(d)` as the only safe mode and do not wire `γ=3` into IVF.
+- `m=8` recall at or below `m=1` means extra residual levels are not buying neighbors. Stop before Task 6.
+- `prune_ratio` at `γ=3` near `0` means the bound is still too loose. Ship `IVF_MRQ` with `γ = sqrt(d)` only.
+- `prune_ratio` at `γ=3` high while its `recall_at_10` falls well below the unpruned `m=8` row means the aggressive bound deletes true neighbors. Do not expose `γ=3` as the default.
 - Clustered recall is diagnostic only. It is not a gate.
 
 - [ ] **Step 4: Commit**
@@ -1021,12 +1021,318 @@ git commit -m "test(index): add residual-level recall and prune spike"
 
 ---
 
+### Task 6: Register `IVF_MRQ` without changing `IVF_RQ`
+
+**Files:**
+- Modify: `rust/lance-index-core/src/lib.rs`
+- Modify: `rust/lance-index/src/lib.rs`
+- Modify: `protos/index.proto`
+- Test: `rust/lance-index/src/lib.rs` (`test_index_type_try_from_str_covers_all_parseable_variants`)
+
+**Interfaces:**
+- Consumes: existing `IndexType::IvfRq = 107`, version `2`
+- Produces:
+  - `IndexType::IvfMrq = 108`
+  - `Display` / `TryFrom<&str>` accept `"IVF_MRQ"`
+  - `IndexType::IvfMrq.version() == 3`
+  - `IndexType::IvfRq.version()` stays `2`
+  - `IVF_MRQ_INDEX_VERSION: u32 = 3`
+  - `max_vector_version()` returns `3`
+  - Protobuf `VectorIndexDetails.MultiResidualQuantization { uint32 levels = 1; }` as `compression` field `10`
+
+- [ ] **Step 1: Write the failing test**
+
+In `rust/lance-index/src/lib.rs`, extend `test_index_type_try_from_str_covers_all_parseable_variants` with `("IVF_MRQ", IndexType::IvfMrq)` and add:
+
+```rust
+    #[test]
+    fn test_ivf_mrq_version_does_not_change_ivf_rq() {
+        assert_eq!(IndexType::IvfRq.version(), 2);
+        assert_eq!(IndexType::IvfMrq.version(), 3);
+        assert_eq!(IndexType::max_vector_version(), IVF_MRQ_INDEX_VERSION);
+    }
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p lance-index test_ivf_mrq_version_does_not_change_ivf_rq --lib`
+
+Expected: FAIL because `IndexType::IvfMrq` does not exist.
+
+- [ ] **Step 3: Add the variant and the proto arm**
+
+In `IndexType`, after `IvfRq = 107;`:
+
+```rust
+    IvfMrq = 108,
+```
+
+Add the variant to `Display`, both `TryFrom` impls, `version` (`3`), `target_partition_size` (`4096`, same as `IvfRq`), `max_vector_version`, and `matches_details` (still `VectorIndexDetails`). Update the exhaustive test vectors in `lance-index/src/lib.rs`.
+
+In `protos/index.proto`, inside `VectorIndexDetails`, before the `oneof compression`:
+
+```protobuf
+  message MultiResidualQuantization {
+    // Number of residual 1-bit levels. Valid range is 1..=8.
+    // Absent on old writers. Readers of IVF_MRQ require this field.
+    uint32 levels = 1;
+  }
+```
+
+Inside `oneof compression`, after `FlatCompression flat = 8;`:
+
+```protobuf
+    MultiResidualQuantization mrq = 10;
+```
+
+Regenerate Rust protobuf with the repo's existing proto build (`cargo check -p lance-index`). Do not edit generated files by hand.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `cargo test -p lance-index test_ivf_mrq_version_does_not_change_ivf_rq --lib`
+
+Expected: PASS. `IndexType::IvfRq` tests still expect version `2`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add rust/lance-index-core/src/lib.rs rust/lance-index/src/lib.rs protos/index.proto
+git commit -m "feat(index): add IVF_MRQ index type"
+```
+
+---
+
+### Task 7: `MrqQuantizer` and the IVF build path
+
+**Files:**
+- Create: `rust/lance-index/src/vector/mrq/mod.rs`
+- Modify: `rust/lance-index/src/vector.rs` (`pub mod mrq;`)
+- Modify: `rust/lance-index/src/vector/quantizer.rs`
+- Modify: `rust/lance/src/index/vector.rs`
+- Modify: `python/src/dataset.rs`
+
+**Interfaces:**
+- Consumes: `encode_rotated`, `search_partition`, `ResidualEncoder`, `EncodedVector`
+- Produces:
+  - `MrqBuildParams { pub levels: u8 }` with `levels` validated in `1..=8`
+  - `MrqQuantizer` implementing `Quantization`
+  - `Quantizer::Mrq(MrqQuantizer)` and `QuantizationType::Mrq` displayed as `"MRQ"`
+  - `StageParams::MRQ(MrqBuildParams)`
+  - `VectorIndexParams::ivf_mrq(num_partitions: usize, levels: u8, distance_type: DistanceType) -> Self`
+  - `VectorIndexParams::index_type()` returns `IndexType::IvfMrq` when the last stage is `StageParams::MRQ`
+  - Python `index_type="IVF_MRQ"` reads kwargs `levels` (default `4`)
+
+Storage columns, written by the quantizer and read back by `try_from_batch`:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `_rowid` | uint64 | existing IVF row id |
+| `__mrq_codes` | fixed-size list of uint8, width `levels * ceil(dim / 8)` | level-major packed signs |
+| `__mrq_alpha` | fixed-size list of float32, width `levels` | per-level scale |
+| `__mrq_radius` | fixed-size list of float32, width `levels` | `R_k` |
+| `__mrq_bias` | fixed-size list of float32, width `levels` | `b_k` |
+| `__mrq_norm_sq` | float32 | rotated residual norm squared |
+
+The rotation signs live in quantizer metadata, one vector per index, the same way `RabitQuantizationMetadata.fast_rotation_signs` is shared. Build still runs `ResidualTransform` before quantization, as `IvfIndexBuilder` already does for `RabitQuantizer`.
+
+`VectorStore` distance for a partition calls `search_partition` with `gamma = sqrt(dim)` by default. Do not call `RabitDistCalculator`.
+
+- [ ] **Step 1: Write the failing parameter test**
+
+In `rust/lance/src/index/vector.rs` tests, or a new `mrq` unit test next to `VectorIndexParams::ivf_rq`:
+
+```rust
+#[test]
+fn ivf_mrq_params_report_mrq_index_type() {
+    let params = VectorIndexParams::ivf_mrq(16, 8, DistanceType::L2);
+    assert_eq!(params.index_type(), IndexType::IvfMrq);
+    let VectorIndexParams { stages, .. } = params;
+    match stages.last() {
+        Some(StageParams::MRQ(mrq)) => assert_eq!(mrq.levels, 8),
+        other => panic!("expected MRQ stage, got {other:?}"),
+    }
+}
+
+#[test]
+fn ivf_mrq_rejects_nine_levels() {
+    let error = MrqBuildParams::new(9).unwrap_err();
+    assert!(error.to_string().contains("1..=8"));
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p lance ivf_mrq_params_report_mrq_index_type --lib`
+
+Expected: FAIL because `ivf_mrq` is not defined.
+
+- [ ] **Step 3: Implement the quantizer and the parameter plumbing**
+
+`MrqBuildParams::new`:
+
+```rust
+impl MrqBuildParams {
+    pub fn new(levels: u8) -> Result<Self> {
+        if !(1..=8).contains(&levels) {
+            return Err(Error::invalid_input(format!(
+                "IVF_MRQ levels must be in 1..=8, got {levels}"
+            )));
+        }
+        Ok(Self { levels })
+    }
+}
+```
+
+`VectorIndexParams::ivf_mrq` follows `ivf_rq`, with `StageParams::MRQ` in place of `StageParams::RQ`. `index_type()` gains:
+
+```rust
+(2, _, Some(StageParams::MRQ(_))) => IndexType::IvfMrq,
+```
+
+The local build match in `build_vector_index` and the distributed match in `IndexType::IvfRq` each gain an `IndexType::IvfMrq` arm that constructs `IvfIndexBuilder::<FlatIndex, MrqQuantizer>` with `MrqBuildParams`. Copy the `IvfRq` arm and change only the quantizer type and the stage enum. Leave the `IvfRq` arm body untouched.
+
+In `python/src/dataset.rs`:
+
+- Add `"IVF_MRQ"` to the vector-index type list around the `"IVF_RQ"` pattern.
+- In the params match, add:
+
+```rust
+"IVF_MRQ" => {
+    let mut levels: u8 = 4;
+    if let Some(kwargs) = kwargs
+        && let Some(value) = kwargs.get_item("levels")?
+    {
+        levels = value.extract()?;
+    }
+    if kwargs.and_then(|kwargs| kwargs.get_item("num_bits").ok()).flatten().is_some() {
+        return Err(PyValueError::new_err(
+            "IVF_MRQ uses `levels` (1..=8), not `num_bits`",
+        ));
+    }
+    let mrq_params = MrqBuildParams::new(levels)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok(Box::new(VectorIndexParams::with_ivf_mrq_params(
+        m_type, ivf_params, mrq_params,
+    )))
+}
+```
+
+Quantizer `quantize` rotates the residual batch with the shared signs and calls `encode_rotated(..., joint: true)`. `from_metadata` restores the same signs.
+
+Every `match` on `Quantizer` and `QuantizationType` must compile. Add `Mrq` arms that return the MRQ column or metadata key. Do not change the `Rabit` arm expressions.
+
+- [ ] **Step 4: Run the parameter tests**
+
+Run: `cargo test -p lance ivf_mrq_params_report_mrq_index_type --lib`
+
+Expected: PASS. `cargo check -p lance --tests` is clean, including the new match arms.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add rust/lance-index/src/vector/mrq/mod.rs rust/lance-index/src/vector.rs \
+  rust/lance-index/src/vector/quantizer.rs rust/lance/src/index/vector.rs python/src/dataset.rs
+git commit -m "feat(index): build IVF_MRQ from residual 1-bit levels"
+```
+
+---
+
+### Task 8: Recall comparison against `IVF_RQ`
+
+**Files:**
+- Modify: `python/python/tests/test_vector_index.py`
+- Modify: `python/python/lance/dataset.py` docstring for `create_index`
+- Modify: `docs/src/format/index/vector/index.md` with an `IVF_MRQ` auxiliary schema section
+
+**Interfaces:**
+- Consumes: `dataset.create_index(..., index_type="IVF_MRQ", levels=m)` and the existing `IVF_RQ` `num_bits` argument
+- Produces: one parametrized test, `test_ivf_mrq_matches_ivf_rq_recall`, and a format note that `IVF_MRQ` is a new index version `3`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `python/python/tests/test_vector_index.py`, beside `test_create_ivf_rq_index`:
+
+```python
+@pytest.mark.parametrize("budget", [1, 4, 8])
+def test_ivf_mrq_matches_ivf_rq_recall(tmp_path, budget):
+    dim = 32
+    rows = 256
+    k = 10
+    uri = tmp_path / "mrq.lance"
+    data = np.random.default_rng(0).standard_normal((rows, dim)).astype(np.float32)
+    table = pa.table({"id": pa.array(np.arange(rows)), "vector": pa.array(data)})
+    dataset = lance.write_dataset(table, uri)
+    queries = data[:8]
+
+    def recall(index_type, **params):
+        dataset.create_index(
+            "vector",
+            index_type,
+            num_partitions=4,
+            replace=True,
+            metric="L2",
+            **params,
+        )
+        hits = 0
+        for row in range(len(queries)):
+            exact = np.argsort(np.linalg.norm(data - queries[row], axis=1))[:k]
+            found = dataset.to_table(
+                nearest={
+                    "column": "vector",
+                    "q": queries[row],
+                    "k": k,
+                }
+            ).column("id").to_pylist()
+            hits += len(set(exact.tolist()) & set(found))
+        return hits / (len(queries) * k)
+
+    rq_recall = recall("IVF_RQ", num_bits=budget)
+    mrq_recall = recall("IVF_MRQ", levels=budget)
+    assert rq_recall >= 0.5, rq_recall
+    assert mrq_recall >= 0.5, mrq_recall
+    assert mrq_recall + 0.05 >= rq_recall, (mrq_recall, rq_recall, budget)
+```
+
+Use the dataset helper style already used by `test_create_ivf_rq_index` if that test builds the table differently. Keep the assertions.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+From `python/`:
+
+Run: `uv run pytest python/tests/test_vector_index.py::test_ivf_mrq_matches_ivf_rq_recall -q`
+
+Expected: FAIL because `IVF_MRQ` is rejected or recall is below the floor. A missing-index-type error fails the task until Task 7 is in the same build.
+
+- [ ] **Step 3: Document the format and keep the test as the comparison gate**
+
+In `docs/src/format/index/vector/index.md`, add an `IVF_MRQ` auxiliary schema with the six columns from Task 7. State that `levels` is `1..=8`, version is `3`, and `IVF_RQ` readers do not parse these columns.
+
+In the `create_index` docstring, document `levels` for `IVF_MRQ` the same way `num_bits` is documented for `IVF_RQ`. Default `4`.
+
+No production search change belongs in this step unless the test shows the index cannot be queried. Default search `γ` stays `sqrt(dim)`.
+
+- [ ] **Step 4: Run the comparison**
+
+Run: `uv run pytest python/tests/test_vector_index.py::test_ivf_mrq_matches_ivf_rq_recall -q`
+
+Expected: PASS for budgets `1`, `4`, and `8`. If `mrq_recall + 0.05 < rq_recall`, stop and fix the quantizer. Do not weaken `0.05` or `0.5`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add python/python/tests/test_vector_index.py python/python/lance/dataset.py docs/src/format/index/vector/index.md
+git commit -m "test(index): compare IVF_MRQ recall with IVF_RQ"
+```
+
+---
+
 ## Self-review
 
-- Spec coverage: one rotation, greedy `α`, joint refit, bias-corrected cap, per-row heap umbrella, `γ = sqrt(d)` safe mode, and the recall floor each have a task. IVF files are explicitly deferred.
-- The self-query test locks the `b_k` term. Removing `level.bias` from `lower_bound_sq` fails `self_query_lower_bound_stays_non_positive` at intermediate levels when `γ R L / sqrt(d) < b_k`.
-- `num_bits`, `__blocked_ex_codes`, and `error_factor_value` are not reused. `γ` is not the existing `1.9` angular constant.
-- Placeholder scan: no TBD steps. Phase 2 is a gate, not a task in this plan.
+- Spec coverage: levels `1..=8`, one rotation, greedy `α`, 8×8 joint refit, bias-corrected cap, `IndexType::IvfMrq = 108`, version `3`, and the `IVF_RQ` comparison each have a task.
+- `IVF_RQ` version stays `2`. The new proto field number is `10`. `num_bits` is rejected on `IVF_MRQ`.
+- The self-query test locks the `b_k` term. Removing `level.bias` from `lower_bound_sq` fails `self_query_lower_bound_stays_non_positive`.
+- Comparison budget is `levels = num_bits` at `1`, `4`, and `8`. The recall floor is `0.5`, and `IVF_MRQ` may trail `IVF_RQ` by at most `0.05`.
+- Placeholder scan: no TBD steps. Java is not in this plan; Python is the public entry. Add Java only if a later request asks for it.
 
 ## Execution handoff
 
