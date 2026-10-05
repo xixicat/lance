@@ -151,6 +151,11 @@ impl PairwiseScorer {
             Quantizer::Product(pq) => Self::Product(PQPairScorer::new(pq, &centroid, metric)?),
             Quantizer::Scalar(sq) => Self::Scalar(SQPairScorer::new(sq, metric)?),
             Quantizer::Rabit(rq) => Self::Rabit(RQPairScorer::new(rq, centroid, metric)?),
+            Quantizer::Mrq(_) => {
+                return Err(Error::not_supported(
+                    "IVF_MRQ does not support pairwise distance".to_string(),
+                ));
+            }
         })
     }
 

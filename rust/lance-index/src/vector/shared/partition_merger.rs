@@ -36,6 +36,7 @@ pub enum SupportedIvfIndexType {
     IvfPq,
     IvfSq,
     IvfRq,
+    IvfMrq,
     IvfHnswFlat,
     IvfHnswPq,
     IvfHnswSq,
@@ -49,6 +50,7 @@ impl SupportedIvfIndexType {
             Self::IvfPq => "IVF_PQ",
             Self::IvfSq => "IVF_SQ",
             Self::IvfRq => "IVF_RQ",
+            Self::IvfMrq => "IVF_MRQ",
             Self::IvfHnswFlat => "IVF_HNSW_FLAT",
             Self::IvfHnswPq => "IVF_HNSW_PQ",
             Self::IvfHnswSq => "IVF_HNSW_SQ",
@@ -64,6 +66,7 @@ impl SupportedIvfIndexType {
             "IVF_PQ" => Some(Self::IvfPq),
             "IVF_SQ" => Some(Self::IvfSq),
             "IVF_RQ" => Some(Self::IvfRq),
+            "IVF_MRQ" => Some(Self::IvfMrq),
             "IVF_HNSW_FLAT" => Some(Self::IvfHnswFlat),
             "IVF_HNSW_PQ" => Some(Self::IvfHnswPq),
             "IVF_HNSW_SQ" => Some(Self::IvfHnswSq),
@@ -82,6 +85,10 @@ impl SupportedIvfIndexType {
             .fields
             .iter()
             .any(|f| f.name() == crate::vector::bq::storage::RABIT_CODE_COLUMN);
+        let has_mrq_code_col = schema
+            .fields
+            .iter()
+            .any(|f| f.name() == crate::vector::mrq::MRQ_CODE_COLUMN);
 
         let is_pq = reader
             .metadata()
@@ -101,20 +108,27 @@ impl SupportedIvfIndexType {
             .metadata
             .contains_key(RABIT_METADATA_KEY)
             || has_rq_code_col;
+        let is_mrq = reader
+            .metadata()
+            .file_schema
+            .metadata
+            .contains_key(crate::vector::mrq::MRQ_METADATA_KEY)
+            || has_mrq_code_col;
 
         // Detect HNSW-related columns
         let has_hnsw_vector_id_col = schema.fields.iter().any(|f| f.name() == "__vector_id");
         let has_hnsw_pointer_col = schema.fields.iter().any(|f| f.name() == "__pointer");
         let has_hnsw = has_hnsw_vector_id_col || has_hnsw_pointer_col;
 
-        let index_type = match (has_hnsw, is_pq, is_sq, is_rq) {
-            (false, false, false, false) => Self::IvfFlat,
-            (false, true, false, false) => Self::IvfPq,
-            (false, false, true, false) => Self::IvfSq,
-            (false, false, false, true) => Self::IvfRq,
-            (true, false, false, false) => Self::IvfHnswFlat,
-            (true, true, false, false) => Self::IvfHnswPq,
-            (true, false, true, false) => Self::IvfHnswSq,
+        let index_type = match (has_hnsw, is_pq, is_sq, is_rq, is_mrq) {
+            (false, false, false, false, false) => Self::IvfFlat,
+            (false, true, false, false, false) => Self::IvfPq,
+            (false, false, true, false, false) => Self::IvfSq,
+            (false, false, false, true, false) => Self::IvfRq,
+            (false, false, false, false, true) => Self::IvfMrq,
+            (true, false, false, false, false) => Self::IvfHnswFlat,
+            (true, true, false, false, false) => Self::IvfHnswPq,
+            (true, false, true, false, false) => Self::IvfHnswSq,
             _ => {
                 return Err(Error::not_supported_source(
                     "Unsupported index type combination detected".into(),

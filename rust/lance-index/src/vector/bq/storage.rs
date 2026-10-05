@@ -2745,6 +2745,16 @@ impl QuantizerStorage for RabitQuantizationStorage {
 /// in a single pass, avoiding the intermediate `Vec` allocation that
 /// `get_rq_code` + iterator would require.
 #[inline]
+pub(crate) fn rabit_packed_code_ip(
+    codes: &[u8],
+    id: usize,
+    num_vectors: usize,
+    num_code_bytes: usize,
+    dist_table: &[f32],
+) -> f32 {
+    compute_single_rq_distance(codes, id, num_vectors, num_code_bytes, dist_table)
+}
+
 fn compute_single_rq_distance(
     codes: &[u8],
     id: usize,

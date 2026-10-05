@@ -218,11 +218,18 @@ message VectorIndexDetails {
   // No quantization; vectors are stored as-is.
   message FlatCompression {}
 
+  message MultiResidualQuantization {
+    // Number of residual 1-bit levels. Valid range is 1..=8.
+    // Absent on old writers. Readers of IVF_MRQ require this field.
+    uint32 levels = 1;
+  }
+
   oneof compression {
     ProductQuantization pq = 4;
     ScalarQuantization sq = 5;
     RabitQuantization rq = 6;
     FlatCompression flat = 8;
+    MultiResidualQuantization mrq = 10;
   }
 
   /* Runtime hints: optional build preferences that don't affect index structure.

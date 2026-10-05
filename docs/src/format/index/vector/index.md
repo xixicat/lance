@@ -392,7 +392,40 @@ pa.schema([
 ])
 ```
 
-### Appendix 3: Accessing Index File with Python
+### Appendix 3: Example IVF_MRQ Format
+
+`IVF_MRQ` is a separate index from `IVF_RQ`. It stores 1 to 8 residual 1-bit levels
+that share one Fast rotation. The index file version is 3. `IVF_RQ` readers do not
+parse these columns. Codes are packed sign bits in rotated space: bit 1 means `+1`
+and bit 0 means `-1`. Document codes are `±1`. Each level's scale is the joint
+least-squares coefficient multiplied by `||r||² / ⟨r, r̂⟩`, so the reconstruction
+is unbiased along the rotated residual. Search reuses the RaBitQ 1-bit FastScan
+layout. There is no per-level radius or bias column.
+
+#### Index File
+
+- Arrow Schema Metadata:
+  - `"lance:index"` → `{ "type": "IVF_MRQ", "distance_type": "l2" }`
+  - `"lance:ivf"` → IVF metadata position in the global buffer
+  - `"lance:flat"` → one empty string per partition
+
+#### Auxiliary File
+
+- Arrow Schema Metadata:
+  - `"distance_type"` → `"l2"`
+  - `"lance:mrq"` → `{"dim":128,"levels":4,"signs":[...]}`
+- Rows with Arrow schema (`levels = 4`, dimension 128):
+
+```python
+pa.schema([
+    pa.field("_rowid", pa.uint64()),
+    pa.field("__mrq_codes", pa.list_(pa.uint8(), list_size=64)),  # levels * ceil(dim / 8)
+    pa.field("__mrq_alpha", pa.list_(pa.float32(), list_size=4)),
+    pa.field("__mrq_norm_sq", pa.float32()),
+])
+```
+
+### Appendix 4: Accessing Index File with Python
 
 The following example demonstrates how to read and parse different components in the Lance index files using Python:
 

@@ -526,6 +526,7 @@ impl<'a> CreateIndexBuilder<'a> {
                 | IndexType::IvfSq
                 | IndexType::IvfFlat
                 | IndexType::IvfRq
+                | IndexType::IvfMrq
                 | IndexType::IvfHnswFlat
                 | IndexType::IvfHnswPq
                 | IndexType::IvfHnswSq,
@@ -989,6 +990,7 @@ fn is_builtin_vector_index(index_type: IndexType, params: &dyn IndexParams) -> b
                 | IndexType::IvfSq
                 | IndexType::IvfFlat
                 | IndexType::IvfRq
+                | IndexType::IvfMrq
                 | IndexType::IvfHnswFlat
                 | IndexType::IvfHnswPq
                 | IndexType::IvfHnswSq

@@ -970,6 +970,7 @@ async fn merge_partial_vector_auxiliary_files_inner(
                     "IVF_PQ" => SupportedIvfIndexType::IvfPq,
                     "IVF_SQ" => SupportedIvfIndexType::IvfSq,
                     "IVF_RQ" => SupportedIvfIndexType::IvfRq,
+                    "IVF_MRQ" => SupportedIvfIndexType::IvfMrq,
                     "IVF_HNSW_FLAT" => SupportedIvfIndexType::IvfHnswFlat,
                     "IVF_HNSW_PQ" => SupportedIvfIndexType::IvfHnswPq,
                     "IVF_HNSW_SQ" => SupportedIvfIndexType::IvfHnswSq,
@@ -1519,6 +1520,11 @@ async fn merge_partial_vector_auxiliary_files_inner(
                         init_writer_for_sq(object_store, &aux_out, dt, &sq_meta_parsed, fv).await?;
                     v2w_opt = Some(w);
                 }
+            }
+            SupportedIvfIndexType::IvfMrq => {
+                return Err(Error::index(
+                    "distributed merge of IVF_MRQ is not implemented".to_string(),
+                ));
             }
         }
 
