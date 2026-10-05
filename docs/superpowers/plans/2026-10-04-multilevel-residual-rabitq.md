@@ -6,6 +6,8 @@
 
 **结构：** 数学放在 `lance-index` 的 `residual_levels.rs`，不改 `RabitQuantizer`。`IVF_MRQ` 是新的 `IndexType`（`IvfMrq = 108`）和新的量化器，走和 `IVF_RQ` 相同的 IVF 构建器。现有 `IVF_RQ` 文件的读写行为保持不变。固定种子的例子打印算法表。数据集测试在同一批向量上同时建两种索引并记录召回。
 
+**实现修订：** 联合最小二乘之后，系数再乘 `||r||² / ⟨r, r̂⟩`，使重建在原残差方向上无偏。索引不再存 `__mrq_radius` 和 `__mrq_bias`。分区打分复用 RaBitQ accurate 模式的 1-bit FastScan（u16 查找表），每个查询建一次查找表，每一级扫一次。u8 表的误差会改写 top-k，所以阈值附近的行再用标量内积校正。`||q||₁ · Σ|α|` 硬上界留在标量 `search_partition`。IVF 热路径实测按 32 行分批早停比整级 FastScan 更慢，所以热路径扫完每一级。下面正文里关于 `b_k`、`R_k` 和 `γ` 的段落是最初的设计记录。
+
 **技术栈：** Rust、`lance-index` 包、现有 `vector/bq/rotation.rs`、`rand` 0.9、`rand_distr`。
 
 ## 全局约束

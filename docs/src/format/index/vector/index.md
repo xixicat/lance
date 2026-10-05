@@ -397,7 +397,10 @@ pa.schema([
 `IVF_MRQ` is a separate index from `IVF_RQ`. It stores 1 to 8 residual 1-bit levels
 that share one Fast rotation. The index file version is 3. `IVF_RQ` readers do not
 parse these columns. Codes are packed sign bits in rotated space: bit 1 means `+1`
-and bit 0 means `-1`. Document codes are `±1`.
+and bit 0 means `-1`. Document codes are `±1`. Each level's scale is the joint
+least-squares coefficient multiplied by `||r||² / ⟨r, r̂⟩`, so the reconstruction
+is unbiased along the rotated residual. Search reuses the RaBitQ 1-bit FastScan
+layout. There is no per-level radius or bias column.
 
 #### Index File
 
@@ -418,8 +421,6 @@ pa.schema([
     pa.field("_rowid", pa.uint64()),
     pa.field("__mrq_codes", pa.list_(pa.uint8(), list_size=64)),  # levels * ceil(dim / 8)
     pa.field("__mrq_alpha", pa.list_(pa.float32(), list_size=4)),
-    pa.field("__mrq_radius", pa.list_(pa.float32(), list_size=4)),
-    pa.field("__mrq_bias", pa.list_(pa.float32(), list_size=4)),
     pa.field("__mrq_norm_sq", pa.float32()),
 ])
 ```

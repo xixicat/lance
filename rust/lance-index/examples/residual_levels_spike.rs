@@ -52,7 +52,6 @@ fn recall_for(
     queries: &[Vec<f32>],
     levels: usize,
     k: usize,
-    gamma: f32,
     prune: bool,
 ) -> (f32, f32) {
     let encoded: Vec<_> = rows
@@ -85,7 +84,7 @@ fn recall_for(
                 .then_with(|| left.1.cmp(&right.1))
         });
         let truth: HashSet<usize> = exact.into_iter().take(k).map(|(_, id)| id).collect();
-        let stats = search_partition(&rotated_query, &encoded, k, gamma, prune);
+        let stats = search_partition(&rotated_query, &encoded, k, prune);
         let hits = stats
             .hits
             .iter()
@@ -101,17 +100,20 @@ fn recall_for(
 fn main() -> ExitCode {
     let mut rng = StdRng::seed_from_u64(42);
     let mut failed = false;
-    println!("dataset\tdim\trows\tqueries\tm\tgamma\tprune\trecall_at_10\tprune_ratio");
+    println!("dataset\tdim\trows\tqueries\tm\tprune\trecall_at_10\tprune_ratio");
 
     let rotated = vec![0.2, -0.4, 0.6, -0.8, 1.0, -1.2, 0.3, -0.7];
     let probe = encode_rotated(&rotated, 4, true).unwrap();
+    let self_distance = lance_index::vector::bq::residual_levels::estimated_l2_sq(&rotated, &probe);
+    if self_distance.abs() > 1.0e-2 {
+        eprintln!("self-query distance failed distance={self_distance}");
+        failed = true;
+    }
     for done in 1..=probe.levels.len() {
-        for gamma in [3.0f32, (probe.dim as f32).sqrt()] {
-            let bound = lower_bound_sq(&rotated, &probe, done, gamma);
-            if bound > 1.0e-2 {
-                eprintln!("self-query bound failed done={done} gamma={gamma} bound={bound}");
-                failed = true;
-            }
+        let bound = lower_bound_sq(&rotated, &probe, done);
+        if bound > 1.0e-2 {
+            eprintln!("self-query bound failed done={done} bound={bound}");
+            failed = true;
         }
     }
 
@@ -125,18 +127,11 @@ fn main() -> ExitCode {
             })
             .collect();
         let encoder = ResidualEncoder::new(dim);
-        let gamma_safe = (dim as f32).sqrt();
         let mut recall_m1 = 0.0f32;
         let mut recall_m8 = 0.0f32;
-        let mut prune_safe = 0.0f32;
-        let mut prune_aggressive = 0.0f32;
         for levels in [1usize, 2, 4, 8] {
-            let (recall, _) = recall_for(
-                &encoder, &data.rows, &queries, levels, 10, gamma_safe, false,
-            );
-            println!(
-                "gaussian\t{dim}\t{rows}\t{queries_n}\t{levels}\t{gamma_safe:.4}\toff\t{recall:.4}\t0"
-            );
+            let (recall, _) = recall_for(&encoder, &data.rows, &queries, levels, 10, false);
+            println!("gaussian\t{dim}\t{rows}\t{queries_n}\t{levels}\toff\t{recall:.4}\t0");
             if levels == 1 {
                 recall_m1 = recall;
             }
@@ -144,18 +139,10 @@ fn main() -> ExitCode {
                 recall_m8 = recall;
             }
         }
-        for (label, gamma) in [("aggressive", 3.0f32), ("safe", gamma_safe)] {
-            let (recall, prune_ratio) =
-                recall_for(&encoder, &data.rows, &queries, 8, 10, gamma, true);
-            println!(
-                "gaussian\t{dim}\t{rows}\t{queries_n}\t8\t{gamma:.4}\t{label}\t{recall:.4}\t{prune_ratio:.4}"
-            );
-            if label == "safe" {
-                prune_safe = prune_ratio;
-            } else {
-                prune_aggressive = prune_ratio;
-            }
-        }
+        let (recall_pruned, prune_ratio) = recall_for(&encoder, &data.rows, &queries, 8, 10, true);
+        println!(
+            "gaussian\t{dim}\t{rows}\t{queries_n}\t8\ton\t{recall_pruned:.4}\t{prune_ratio:.4}"
+        );
         if dim == 128 && recall_m8 < 0.5 {
             eprintln!("gate failed: dim 128 m=8 recall {recall_m8} < 0.5");
             failed = true;
@@ -164,24 +151,16 @@ fn main() -> ExitCode {
             eprintln!("gate failed: m=8 recall {recall_m8} regressed past m=1 recall {recall_m1}");
             failed = true;
         }
-        if dim == 128 && prune_safe > prune_aggressive + 1.0e-6 {
+        if dim == 128 && recall_pruned + 1.0e-6 < recall_m8 {
             eprintln!(
-                "gate failed: safe prune ratio {prune_safe} exceeded aggressive prune ratio {prune_aggressive}"
+                "gate failed: pruned recall {recall_pruned} dropped below full recall {recall_m8}"
             );
             failed = true;
         }
 
         let clustered = clustered(dim, rows, &mut rng);
-        let (recall, _) = recall_for(
-            &encoder,
-            &clustered.rows,
-            &queries,
-            8,
-            10,
-            gamma_safe,
-            false,
-        );
-        println!("clustered\t{dim}\t{rows}\t{queries_n}\t8\t{gamma_safe:.4}\toff\t{recall:.4}\t0");
+        let (recall, _) = recall_for(&encoder, &clustered.rows, &queries, 8, 10, false);
+        println!("clustered\t{dim}\t{rows}\t{queries_n}\t8\toff\t{recall:.4}\t0");
     }
 
     if failed {

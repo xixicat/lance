@@ -3,9 +3,11 @@
 
 //! Greedy residual 1-bit codes in one shared Fast rotation.
 //!
-//! Residuals stay in the rotated space. Each level stores a packed `±1` code,
-//! the coordinate scale `alpha = ||e||_1 / d`, the residual norm, and the inner
-//! product of that residual with the original rotated vector.
+//! Residuals stay in the rotated space. Each level stores a packed `±1` code
+//! and a scale. Joint encoding least-squares the scales, then multiplies them
+//! by `||r||² / ⟨r, r̂⟩` so the reconstruction is unbiased along `r`. Search
+//! can stop after level 1 when the remaining scales cannot beat the heap:
+//! `|⟨±1, q⟩| ≤ ||q||₁`.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -19,9 +21,8 @@ use super::rotation::{apply_fast_rotation, fast_rotation_signs_len, random_fast_
 pub struct LevelCode {
     /// LSB-first packed signs. Bit 1 means `+1`, bit 0 means `-1`.
     pub packed: Vec<u8>,
+    /// Unbiased coefficient on this level's `±1` code.
     pub alpha: f32,
-    pub radius: f32,
-    pub bias: f32,
 }
 
 /// Residual codes for one rotated vector.
@@ -105,9 +106,10 @@ pub fn encode_rotated(rotated: &[f32], levels: usize, joint: bool) -> Result<Enc
 
     if joint {
         refit_joint(rotated, &pm1, &mut alphas);
+        calibrate_unbiased(rotated, &pm1, &mut alphas);
     }
 
-    let levels = materialize_levels(rotated, &pm1, &alphas);
+    let levels = materialize_levels(&pm1, &alphas);
     Ok(EncodedVector {
         dim,
         norm_sq,
@@ -133,23 +135,41 @@ fn assign_signs(residual: &[f32], signs: &mut [i8]) -> f32 {
     l1
 }
 
-fn materialize_levels(rotated: &[f32], pm1: &[Vec<i8>], alphas: &[f32]) -> Vec<LevelCode> {
-    let dim = rotated.len();
-    let mut levels = Vec::with_capacity(alphas.len());
-    let mut residual = rotated.to_vec();
-    for (signs, &alpha) in pm1.iter().zip(alphas.iter()) {
-        for (dst, &sign) in residual.iter_mut().zip(signs.iter()) {
-            *dst -= alpha * f32::from(sign);
-        }
-        levels.push(LevelCode {
+fn materialize_levels(pm1: &[Vec<i8>], alphas: &[f32]) -> Vec<LevelCode> {
+    pm1.iter()
+        .zip(alphas.iter())
+        .map(|(signs, &alpha)| LevelCode {
             packed: pack_signs(signs),
             alpha,
-            radius: dot(&residual, &residual).sqrt(),
-            bias: dot(&residual, rotated),
-        });
-        debug_assert_eq!(signs.len(), dim);
+        })
+        .collect()
+}
+
+/// Scale the reconstruction so `⟨r, r̂⟩ = ||r||²`. Least squares already has
+/// `⟨r, r̂⟩ = ||r̂||²`, so this is `||r||² / ||r̂||²`. A singular Gram falls
+/// back to greedy coefficients, which do not have that identity, so the
+/// divisor is the inner product rather than `||r̂||²`.
+fn calibrate_unbiased(rotated: &[f32], pm1: &[Vec<i8>], alphas: &mut [f32]) {
+    let norm_sq = f64::from(dot(rotated, rotated));
+    if norm_sq == 0.0 {
+        alphas.fill(0.0);
+        return;
     }
-    levels
+    let mut inner = 0.0f64;
+    for (signs, &alpha) in pm1.iter().zip(alphas.iter()) {
+        let mut level_dot = 0.0f64;
+        for (&value, &sign) in rotated.iter().zip(signs.iter()) {
+            level_dot += f64::from(value) * f64::from(sign);
+        }
+        inner += f64::from(alpha) * level_dot;
+    }
+    if inner <= 1.0e-12 {
+        return;
+    }
+    let gamma = norm_sq / inner;
+    for alpha in alphas.iter_mut() {
+        *alpha = (f64::from(*alpha) * gamma) as f32;
+    }
 }
 
 fn pack_signs(signs: &[i8]) -> Vec<u8> {
@@ -264,36 +284,30 @@ pub fn estimated_l2_sq(rotated_query: &[f32], encoded: &EncodedVector) -> f32 {
     encoded.norm_sq + query_sq - 2.0 * score
 }
 
-pub fn lower_bound_sq(
-    rotated_query: &[f32],
-    encoded: &EncodedVector,
-    done: usize,
-    gamma: f32,
-) -> f32 {
+fn l1_norm(values: &[f32]) -> f32 {
+    values.iter().map(|value| value.abs()).sum()
+}
+
+/// Lower bound on the final estimated squared distance after `done` levels.
+///
+/// The unfinished levels contribute at most `||q||₁ * Σ |α|` because each
+/// code is `±1`.
+pub fn lower_bound_sq(rotated_query: &[f32], encoded: &EncodedVector, done: usize) -> f32 {
     debug_assert!((1..=encoded.levels.len()).contains(&done));
     let query_sq = dot(rotated_query, rotated_query);
-    let query_norm = query_sq.sqrt();
     let score = encoded
         .levels
         .iter()
         .take(done)
         .map(|level| level.alpha * dot_packed_pm1(&level.packed, rotated_query))
         .sum::<f32>();
-    let level = &encoded.levels[done - 1];
-    let cauchy = level.radius * query_norm;
-    let sigma = cauchy / (encoded.dim as f32).sqrt();
-    let cap = cauchy.min(level.bias + gamma * sigma);
-    encoded.norm_sq + query_sq - 2.0 * (score + cap)
-}
-
-pub fn threshold_cut_sq(
-    est_sq: f32,
-    radius_m: f32,
-    query_norm: f32,
-    dim: usize,
-    gamma: f32,
-) -> f32 {
-    est_sq + 2.0 * gamma * radius_m * query_norm / (dim as f32).sqrt()
+    let tail = encoded
+        .levels
+        .iter()
+        .skip(done)
+        .map(|level| level.alpha.abs())
+        .sum::<f32>();
+    encoded.norm_sq + query_sq - 2.0 * (score + l1_norm(rotated_query) * tail)
 }
 
 #[derive(Clone, Debug)]
@@ -312,13 +326,11 @@ pub fn search_partition(
     rotated_query: &[f32],
     encoded: &[EncodedVector],
     k: usize,
-    gamma: f32,
     prune: bool,
 ) -> SearchStats {
     #[derive(Clone, Copy)]
     struct HeapItem {
         est_sq: f32,
-        radius_m: f32,
         id: usize,
     }
 
@@ -341,7 +353,8 @@ pub fn search_partition(
         }
     }
 
-    let query_norm = dot(rotated_query, rotated_query).sqrt();
+    let query_sq = dot(rotated_query, rotated_query);
+    let query_l1 = l1_norm(rotated_query);
     let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
     let mut pruned = 0usize;
     for (id, row) in encoded.iter().enumerate() {
@@ -357,13 +370,12 @@ pub fn search_partition(
                 && heap.len() >= k
                 && let Some(worst) = heap.peek()
             {
-                let cauchy = level.radius * query_norm;
-                let sigma = cauchy / (row.dim as f32).sqrt();
-                let cap = cauchy.min(level.bias + gamma * sigma);
-                let lower = row.norm_sq + query_norm * query_norm - 2.0 * (score + cap);
-                let cut =
-                    threshold_cut_sq(worst.est_sq, worst.radius_m, query_norm, row.dim, gamma);
-                if lower > cut {
+                let tail = row.levels[done..]
+                    .iter()
+                    .map(|level| level.alpha.abs())
+                    .sum::<f32>();
+                let lower = row.norm_sq + query_sq - 2.0 * (score + query_l1 * tail);
+                if lower > worst.est_sq {
                     dropped = true;
                     break;
                 }
@@ -373,13 +385,8 @@ pub fn search_partition(
             pruned += 1;
             continue;
         }
-        let est_sq = row.norm_sq + query_norm * query_norm - 2.0 * score;
-        let radius_m = row.levels.last().map(|level| level.radius).unwrap_or(0.0);
-        let item = HeapItem {
-            est_sq,
-            radius_m,
-            id,
-        };
+        let est_sq = row.norm_sq + query_sq - 2.0 * score;
+        let item = HeapItem { est_sq, id };
         if heap.len() < k {
             heap.push(item);
         } else if heap.peek().is_some_and(|worst| item < *worst) {
@@ -440,34 +447,23 @@ mod tests {
                 alignment.abs() <= 1.0e-4,
                 "level {level_idx} residual is not orthogonal to its sign: {alignment}"
             );
-            let bias: f32 = residual
-                .iter()
-                .zip(original.iter())
-                .map(|(l, r)| l * r)
-                .sum();
-            assert!(
-                (bias - level.bias).abs() <= 1.0e-4,
-                "level {level_idx} bias {} != {}",
-                level.bias,
-                bias
-            );
-            let radius = residual
-                .iter()
-                .map(|value| value * value)
-                .sum::<f32>()
-                .sqrt();
-            assert!((radius - level.radius).abs() <= 1.0e-4);
         }
         // The first subtraction removes a vector parallel to its sign, so that
-        // residual is orthogonal to the whole prefix reconstruction.
-        let first = &encoded.levels[0];
-        let gap = (first.bias - first.radius * first.radius).abs();
+        // residual is orthogonal to the original vector and bias equals radius².
+        let first_signs = unpack_signs(&encoded.levels[0].packed, original.len());
+        let mut residual = original.clone();
+        for (dst, sign) in residual.iter_mut().zip(first_signs.iter()) {
+            *dst -= encoded.levels[0].alpha * f32::from(*sign);
+        }
+        let bias: f32 = residual
+            .iter()
+            .zip(original.iter())
+            .map(|(l, r)| l * r)
+            .sum();
+        let radius_sq: f32 = residual.iter().map(|value| value * value).sum();
         assert!(
-            gap <= 1.0e-3 * (1.0 + first.radius * first.radius),
-            "bias {} radius {} gap {}",
-            first.bias,
-            first.radius,
-            gap
+            (bias - radius_sq).abs() <= 1.0e-3 * (1.0 + radius_sq),
+            "bias {bias} radius_sq {radius_sq}"
         );
     }
 
@@ -477,8 +473,6 @@ mod tests {
         assert_eq!(encoded.norm_sq, 0.0);
         for level in &encoded.levels {
             assert_eq!(level.alpha, 0.0);
-            assert_eq!(level.radius, 0.0);
-            assert_eq!(level.bias, 0.0);
         }
     }
 
@@ -491,34 +485,17 @@ mod tests {
     }
 
     #[test]
-    fn joint_refit_does_not_increase_final_residual() {
-        let encoded_greedy = encode_rotated(&sample(), 4, false).unwrap();
-        let encoded_joint = encode_rotated(&sample(), 4, true).unwrap();
-        let greedy = encoded_greedy.levels.last().unwrap().radius;
-        let joint = encoded_joint.levels.last().unwrap().radius;
-        assert!(
-            joint <= greedy + 1.0e-3,
-            "joint radius {joint} exceeded greedy radius {greedy}"
-        );
-        // Four signs in dimension 8 are independent here, so least squares
-        // leaves the final residual orthogonal to every selected sign.
-        let final_level = encoded_joint.levels.last().unwrap();
-        let gap = (final_level.bias - final_level.radius * final_level.radius).abs();
-        assert!(
-            gap <= 1.0e-3 * (1.0 + final_level.radius * final_level.radius),
-            "joint bias {} radius {}",
-            final_level.bias,
-            final_level.radius
-        );
-
-        let encoded_greedy = encode_rotated(&sample(), 8, false).unwrap();
-        let encoded_joint = encode_rotated(&sample(), 8, true).unwrap();
-        let greedy = encoded_greedy.levels.last().unwrap().radius;
-        let joint = encoded_joint.levels.last().unwrap().radius;
-        assert!(
-            joint <= greedy + 1.0e-3,
-            "8-level joint radius {joint} exceeded greedy radius {greedy}"
-        );
+    fn joint_refit_keeps_greedy_signs() {
+        for levels in [4usize, 8] {
+            let greedy = encode_rotated(&sample(), levels, false).unwrap();
+            let joint = encode_rotated(&sample(), levels, true).unwrap();
+            for (level_idx, (left, right)) in greedy.levels.iter().zip(&joint.levels).enumerate() {
+                assert_eq!(
+                    left.packed, right.packed,
+                    "level {level_idx} signs changed during joint refit"
+                );
+            }
+        }
     }
 
     #[test]
@@ -528,27 +505,46 @@ mod tests {
     }
 
     #[test]
+    fn joint_calibration_makes_self_distance_zero() {
+        let rotated = sample();
+        for levels in [1usize, 4, 8] {
+            let encoded = encode_rotated(&rotated, levels, true).unwrap();
+            let estimate = estimated_l2_sq(&rotated, &encoded);
+            assert!(
+                estimate.abs() <= 1.0e-3,
+                "levels {levels} self distance {estimate}"
+            );
+        }
+        let encoded = encode_rotated(&rotated, 1, true).unwrap();
+        let l1: f32 = rotated.iter().map(|value| value.abs()).sum();
+        let expected = dot(&rotated, &rotated) / l1;
+        let alpha = encoded.levels[0].alpha;
+        assert!(
+            (alpha - expected).abs() <= 1.0e-3,
+            "m=1 alpha {alpha} expected RQ scale {expected}"
+        );
+    }
+
+    #[test]
     fn self_query_lower_bound_stays_non_positive() {
         let rotated = sample();
         let encoded = encode_rotated(&rotated, 3, true).unwrap();
         for done in 1..=3 {
-            for gamma in [0.0, 3.0, (rotated.len() as f32).sqrt()] {
-                let bound = lower_bound_sq(&rotated, &encoded, done, gamma);
-                assert!(bound <= 1.0e-2, "done {done} gamma {gamma} bound {bound}");
-            }
+            let bound = lower_bound_sq(&rotated, &encoded, done);
+            assert!(bound <= 1.0e-2, "done {done} bound {bound}");
         }
     }
 
     #[test]
-    fn safe_gamma_matches_cauchy_cap() {
-        let dim = 8usize;
-        let radius = 0.5f32;
-        let query_norm = 2.0f32;
-        let cut = threshold_cut_sq(1.0, radius, query_norm, dim, (dim as f32).sqrt());
-        let expected = 1.0 + 2.0 * radius * query_norm;
+    fn l1_tail_cap_is_a_hard_bound_on_the_estimate() {
+        let rotated = sample();
+        let encoded = encode_rotated(&rotated, 4, true).unwrap();
+        let query = [0.1f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+        let estimate = estimated_l2_sq(&query, &encoded);
+        let bound = lower_bound_sq(&query, &encoded, 1);
         assert!(
-            (cut - expected).abs() < 1.0e-5,
-            "cut {cut} expected {expected}"
+            bound <= estimate + 1.0e-4,
+            "bound {bound} exceeded estimate {estimate}"
         );
     }
 
@@ -624,7 +620,7 @@ mod tests {
             });
             let truth: std::collections::HashSet<usize> =
                 exact.iter().take(k).map(|(_, id)| *id).collect();
-            let stats = search_partition(&rotated_query, &encoded, k, dim as f32, false);
+            let stats = search_partition(&rotated_query, &encoded, k, false);
             let hit = stats
                 .hits
                 .iter()
